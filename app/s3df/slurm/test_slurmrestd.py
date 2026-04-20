@@ -56,15 +56,14 @@ async def run_tests(args):
     log.info("── submit_job ──")
     job_spec = JobSpec(
         name="iri-integration-test",
-        executable="#!/bin/bash\n\nhostname\nsleep 15\n",
+        executable="#!/bin/bash\n\nhostname\nsleep 5\n",
         attributes=JobAttributes(
             duration=60,
             queue_name=args.partition,
             account=args.account,
         ),
         resources=ResourceSpec(node_count=1),
-        directory=f"/sdf/home/{args.user[0]}/{args.user}",
-        environment={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+        directory=f"/sdf/home/{args.user[0]}/{args.user}"
     )
     try:
         result = await adapter.submit_job(resource, user, job_spec)
@@ -85,19 +84,19 @@ async def run_tests(args):
 
     # ── cancel_job ──────────────────────────────────────────────────────
     log.info("── cancel_job(%s) ──", job_id)
-    # try:
-    #     cancelled = await adapter.cancel_job(resource, user, job_id)
-    #     log.info("  cancelled=%s", cancelled)
-    # except Exception as e:
-    #     log.error("cancel_job failed: %s", e)
+    try:
+        cancelled = await adapter.cancel_job(resource, user, job_id)
+        log.info("  cancelled=%s", cancelled)
+    except Exception as e:
+        log.error("cancel_job failed: %s", e)
 
     # ── verify cancel ───────────────────────────────────────────────────
     time.sleep(1)
-    # try:
-    #     job = await adapter.get_job(resource, user, job_id)
-    #     log.info("  post-cancel state=%s", job["status"]["state"])
-    # except Exception as e:
-    #     log.error("post-cancel get_job failed: %s", e)
+    try:
+        job = await adapter.get_job(resource, user, job_id)
+        log.info("  post-cancel state=%s", job["status"]["state"])
+    except Exception as e:
+        log.error("post-cancel get_job failed: %s", e)
 
     log.info("── done ──")
 
