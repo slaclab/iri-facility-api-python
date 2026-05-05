@@ -265,6 +265,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         name = job_spec.name
         executable = job_spec.executable
         cwd = str(job_spec.directory) if job_spec.directory else None
+        stdin = job_spec.stdin_path
         stdout = job_spec.stdout_path
         stderr = job_spec.stderr_path
 
@@ -295,6 +296,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 account=account,
                 environment=environment,
                 current_working_directory=cwd,
+                standard_input=stdin,
                 standard_output=stdout,
                 standard_error=stderr,
                 **custom_attributes
