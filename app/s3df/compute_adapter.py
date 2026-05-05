@@ -259,6 +259,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         node_count = 1
         tasks = None
         tasks_per_node = None
+        cpus_per_task = None
         duration_mins = 60
         partition = None
         account = None
@@ -278,6 +279,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             node_count = job_spec.resources.node_count or 1
             tasks = job_spec.resources.process_count
             tasks_per_node = job_spec.resources.processes_per_node
+            cpus_per_task = job_spec.resources.cpu_cores_per_process
 
         if job_spec.attributes:
             if job_spec.attributes.duration is not None:
@@ -295,6 +297,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 nodes=str(node_count),
                 tasks=tasks,
                 tasks_per_node=tasks_per_node,
+                cpus_per_task=cpus_per_task,
                 time_limit=SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit(set=True, number=duration_mins),
                 name=name,
                 script=executable,
