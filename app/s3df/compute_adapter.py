@@ -270,6 +270,8 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         partition = partition or os.environ.get("SLURM_DEFAULT_PARTITION")
         account = account or os.environ.get("SLURM_DEFAULT_ACCOUNT")
 
+        custom_attributes = job_spec.attributes.custom_attributes if job_spec.attributes else {}
+
         slurm_job = SlurmV0041PostJobSubmitRequestJob(
             nodes=str(node_count),
             time_limit=SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit(set=True, number=duration_mins),
@@ -281,11 +283,8 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             current_working_directory=cwd,
             standard_output=stdout,
             standard_error=stderr,
+            **custom_attributes
         )
-
-        # Job array support: e.g. custom_attributes={"array": "0-19"}
-        if job_spec.attributes and "array" in job_spec.attributes.custom_attributes:
-            slurm_job.array = job_spec.attributes.custom_attributes["array"]
 
         req = SlurmV0041PostJobSubmitRequest(job=slurm_job)
 
