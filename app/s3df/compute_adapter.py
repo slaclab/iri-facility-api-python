@@ -274,6 +274,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
 
         name = job_spec.name
         executable = job_spec.executable
+        argv = job_spec.arguments or None
         cwd = str(job_spec.directory) if job_spec.directory else None
         stdin = job_spec.stdin_path
         stdout = job_spec.stdout_path
@@ -319,6 +320,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 time_limit=SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit(set=True, number=duration_mins),
                 name=name,
                 script=executable,
+                argv=argv,
                 partition=partition,
                 account=account,
                 reservation=reservation,
