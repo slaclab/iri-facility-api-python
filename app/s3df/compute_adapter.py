@@ -35,6 +35,9 @@ from slurmrestd_client.models.slurm_v0041_post_job_submit_request_job import (
 from slurmrestd_client.models.slurm_v0041_post_job_submit_request_jobs_inner_time_limit import (
     SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit,
 )
+from slurmrestd_client.models.slurm_v0041_post_job_submit_request_jobs_inner_memory_per_cpu import (
+    SlurmV0041PostJobSubmitRequestJobsInnerMemoryPerCpu,
+)
 from fastapi import HTTPException, Response
 from pydantic import ConfigDict, ValidationError
 
@@ -262,6 +265,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         cpus_per_task = None
         tres_per_task = None
         exclusive = ["true"]
+        memory_per_node = None
         duration_mins = 60
         partition = None
         account = None
@@ -286,6 +290,9 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 tres_per_task = f"gres/gpu:{job_spec.resources.gpu_cores_per_process}"
             if not job_spec.resources.exclusive_node_use:
                 exclusive = ["false"]
+            if job_spec.resources.memory:
+                memory_mb = max(1, job_spec.resources.memory // (1024 * 1024))
+                memory_per_node = SlurmV0041PostJobSubmitRequestJobsInnerMemoryPerCpu(set=True, number=memory_mb)
 
         if job_spec.attributes:
             if job_spec.attributes.duration is not None:
@@ -306,6 +313,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 cpus_per_task=cpus_per_task,
                 tres_per_task=tres_per_task,
                 exclusive=exclusive,
+                memory_per_node=memory_per_node,
                 time_limit=SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit(set=True, number=duration_mins),
                 name=name,
                 script=executable,
