@@ -269,6 +269,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         duration_mins = 60
         partition = None
         account = None
+        reservation = None
         environment = ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
 
         name = job_spec.name
@@ -299,6 +300,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 duration_mins = max(1, int(job_spec.attributes.duration // 60))
             partition = job_spec.attributes.queue_name
             account = job_spec.attributes.account
+            reservation = job_spec.attributes.reservation_id
 
         partition = partition or os.environ.get("SLURM_DEFAULT_PARTITION")
         account = account or os.environ.get("SLURM_DEFAULT_ACCOUNT")
@@ -319,6 +321,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 script=executable,
                 partition=partition,
                 account=account,
+                reservation=reservation,
                 environment=environment,
                 current_working_directory=cwd,
                 standard_input=stdin,
