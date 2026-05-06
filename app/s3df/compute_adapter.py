@@ -89,6 +89,14 @@ SLURM_TO_IRI_STATE: dict[str, JobState] = {
     "STOPPED":       JobState.CANCELED,
 }
 
+# Map from Slurm partition name → GPU type string for GRES
+PARTITION_GPU_TYPE: dict[str, str] = {
+    "ampere": "a100",
+    "turing": "geforce_rtx_2080_ti",
+    "ada":    "l40s",
+    "hopper": "h200",
+}
+
 
 # ---------------------------------------------------------------------------
 # JWT minting — IRI signs tokens using the shared key
@@ -299,7 +307,11 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             tasks_per_node = job_spec.resources.processes_per_node
             cpus_per_task = job_spec.resources.cpu_cores_per_process
             if job_spec.resources.gpu_cores_per_process:
-                tres_per_task = f"gres/gpu:{job_spec.resources.gpu_cores_per_process}"
+                gpu_type = PARTITION_GPU_TYPE.get(partition or "")
+                if gpu_type:
+                    tres_per_task = f"gres/gpu:{gpu_type}:{job_spec.resources.gpu_cores_per_process}"
+                else:
+                    tres_per_task = f"gres/gpu:{job_spec.resources.gpu_cores_per_process}"
             if not job_spec.resources.exclusive_node_use:
                 exclusive = ["false"]
             if job_spec.resources.memory:
