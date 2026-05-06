@@ -35,13 +35,26 @@ from slurmrestd_client.models.slurm_v0041_post_job_submit_request_job import (
 from slurmrestd_client.models.slurm_v0041_post_job_submit_request_jobs_inner_time_limit import (
     SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit,
 )
-from fastapi import Response
+from fastapi import HTTPException, Response
+from pydantic import ConfigDict, ValidationError
 
 from ..routers.compute import models as compute_models
 from ..types.user import User
 from ..routers.status import models as status_models
 
 logger = logging.getLogger(__name__)
+
+
+class SlurmV0041PostJobSubmitRequestJobStrict(SlurmV0041PostJobSubmitRequestJob):
+    # we reject unexpected fields to enable raising ValidationError
+    # TODO: we could see if the autogeneration could be configured to make
+    # this strict by default
+    model_config = ConfigDict(
+        populate_by_name=True,
+        validate_assignment=True,
+        protected_namespaces=(),
+        extra="forbid", 
+    )
 
 # ---------------------------------------------------------------------------
 # Slurm → IRI state mapping
@@ -270,22 +283,27 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         partition = partition or os.environ.get("SLURM_DEFAULT_PARTITION")
         account = account or os.environ.get("SLURM_DEFAULT_ACCOUNT")
 
-        slurm_job = SlurmV0041PostJobSubmitRequestJob(
-            nodes=str(node_count),
-            time_limit=SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit(set=True, number=duration_mins),
-            name=name,
-            script=executable,
-            partition=partition,
-            account=account,
-            environment=environment,
-            current_working_directory=cwd,
-            standard_output=stdout,
-            standard_error=stderr,
-        )
+        custom_attributes = job_spec.attributes.custom_attributes if job_spec.attributes else {}
 
-        # Job array support: e.g. custom_attributes={"array": "0-19"}
-        if job_spec.attributes and "array" in job_spec.attributes.custom_attributes:
-            slurm_job.array = job_spec.attributes.custom_attributes["array"]
+        try:
+            slurm_job = SlurmV0041PostJobSubmitRequestJobStrict(
+                nodes=str(node_count),
+                time_limit=SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit(set=True, number=duration_mins),
+                name=name,
+                script=executable,
+                partition=partition,
+                account=account,
+                environment=environment,
+                current_working_directory=cwd,
+                standard_output=stdout,
+                standard_error=stderr,
+                **custom_attributes
+            )
+        except (ValidationError, TypeError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid job submission parameters: {exc}",
+            ) from exc
 
         req = SlurmV0041PostJobSubmitRequest(job=slurm_job)
 
