@@ -283,6 +283,16 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         if job_spec.environment:
             environment = [f"{k}={v}" for k, v in job_spec.environment.items()]
 
+        if job_spec.attributes:
+            if job_spec.attributes.duration is not None:
+                duration_mins = max(1, int(job_spec.attributes.duration // 60))
+            partition = job_spec.attributes.queue_name
+            account = job_spec.attributes.account
+            reservation = job_spec.attributes.reservation_id
+
+        partition = partition or os.environ.get("SLURM_DEFAULT_PARTITION")
+        account = account or os.environ.get("SLURM_DEFAULT_ACCOUNT")
+
         if job_spec.resources:
             node_count = job_spec.resources.node_count or 1
             tasks = job_spec.resources.process_count
@@ -295,16 +305,6 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             if job_spec.resources.memory:
                 memory_mb = max(1, job_spec.resources.memory // (1024 * 1024))
                 memory_per_node = SlurmV0041PostJobSubmitRequestJobsInnerMemoryPerCpu(set=True, number=memory_mb)
-
-        if job_spec.attributes:
-            if job_spec.attributes.duration is not None:
-                duration_mins = max(1, int(job_spec.attributes.duration // 60))
-            partition = job_spec.attributes.queue_name
-            account = job_spec.attributes.account
-            reservation = job_spec.attributes.reservation_id
-
-        partition = partition or os.environ.get("SLURM_DEFAULT_PARTITION")
-        account = account or os.environ.get("SLURM_DEFAULT_ACCOUNT")
 
         custom_attributes = job_spec.attributes.custom_attributes if job_spec.attributes else {}
 
