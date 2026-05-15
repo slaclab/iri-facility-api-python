@@ -33,5 +33,8 @@ class S3DFSettings:
         self.dex_audience = os.getenv("DEX_AUDIENCE")
         self.dex_username_claim = os.getenv("DEX_USERNAME_CLAIM", "name")
 
+        # user-lookup service (direct LDAP/POSIX identity queries)
+        self.user_lookup_url = os.getenv("USER_LOOKUP_URL", "")
+
 
 settings = S3DFSettings()
