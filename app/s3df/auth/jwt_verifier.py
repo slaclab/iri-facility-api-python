@@ -11,7 +11,7 @@ keys, not from TLS of the fetch itself.
 import asyncio
 import logging
 import ssl
-from typing import Optional
+from typing import List, Optional, Union
 
 import jwt
 from fastapi import HTTPException
@@ -29,7 +29,7 @@ class JwtVerifier:
         self,
         jwks_url: str,
         issuer: str,
-        audience: str,
+        audience: Union[str, List[str]],
         username_claim: str = "name",
     ):
         self.jwks_url = jwks_url

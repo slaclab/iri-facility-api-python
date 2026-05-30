@@ -8,6 +8,7 @@ RUN pip install -U pip wheel setuptools uv && \
     uv pip install --system .
 
 ENV IRI_API_ADAPTER_account="app.s3df.account_adapter.S3DFAccountAdapter"
+ENV IRI_API_ADAPTER_status="app.s3df.status_adapter.S3DFStatusAdapter"
 ENV IRI_SHOW_MISSING_ROUTES="true"
 ENV DEX_JWKS_URL="https://dex.slac.stanford.edu/keys"
 ENV DEX_ISSUER="https://dex.slac.stanford.edu"

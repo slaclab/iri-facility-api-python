@@ -30,7 +30,11 @@ class S3DFSettings:
         # Dex IdP — JWKS-based JWT verification for incoming Bearer tokens.
         self.dex_jwks_url = os.getenv("DEX_JWKS_URL")
         self.dex_issuer = os.getenv("DEX_ISSUER")
-        self.dex_audience = os.getenv("DEX_AUDIENCE")
+        # Comma-separated list of accepted audiences (e.g. "aud1,aud2").
+        _raw_audience = os.getenv("DEX_AUDIENCE", "")
+        self.dex_audience: list[str] = [
+            a.strip() for a in _raw_audience.split(",") if a.strip()
+        ]
         self.dex_username_claim = os.getenv("DEX_USERNAME_CLAIM", "name")
 
         # user-lookup service (direct LDAP/POSIX identity queries)
