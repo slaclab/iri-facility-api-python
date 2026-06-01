@@ -1,40 +1,29 @@
 """
 Configuration for the S3DF status adapter.
 
-Holds the static, request-independent pieces of the adapter:
-
-  * The health-check model (``Backend``, ``Condition``, ``HealthCheck``) — a
-    declarative success-criterion mirroring the model ``status-pusher`` uses.
-  * ``MonitoredResource`` — pairs an IRI ``Resource`` template with the health
-    check that drives it (see the duplication note below).
-  * ``REGISTRY`` — the set of S3DF resources surfaced by ``/status``.
-  * ``StatusSettings`` — environment-driven configuration.
-
-Avoiding Resource/ResourceDef duplication
-------------------------------------------
-A resource's stable identity/metadata (id, name, description, group,
-resource_type, capability_ids) is declared exactly once, as an IRI
-``Resource`` template inside ``MonitoredResource``. The runtime-owned fields
-(``current_status``, ``last_modified``, ``site_id``) are placeholders here and
-are overlaid by the store when it projects a live view, so the fields are never
-re-listed in a parallel definition.
+IRI owns the S3DF status runtime: it periodically runs configured health checks,
+evaluates status-pusher-style conditions, and caches the latest result for each
+resource. The external S3DF status repositories are reference material only; this
+module does not fetch dashboard log files.
 
 Required/optional env vars:
-  S3DF_PROMETHEUS_URL       Prometheus base URL   (default https://prometheus.slac.stanford.edu)
-  S3DF_INFLUXDB_URL         InfluxDB base URL     (default https://influxdb.slac.stanford.edu)
-  S3DF_INFLUXDB_DB          InfluxDB database     (default telegraf)
-  S3DF_STATUS_POLL_INTERVAL Seconds between polls (default 60)
-  S3DF_STATUS_HTTP_TIMEOUT  Per-query timeout sec (default 15)
-  S3DF_SITE_ID              Site id for resources (default s3df)
-  S3DF_STATUS_TLS_VERIFY    true | false | <ca-bundle-path>  (default false)
+  S3DF_PROMETHEUS_URL        Prometheus base URL   (default https://prometheus.slac.stanford.edu)
+  S3DF_INFLUXDB_URL          InfluxDB base URL     (default https://influxdb.slac.stanford.edu)
+  S3DF_INFLUXDB_DB           InfluxDB database     (default telegraf)
+  S3DF_STATUS_CHECKS_JSON    JSON mapping resource ids to additional health checks
+  S3DF_STATUS_POLL_INTERVAL  Seconds between polls (default 60)
+  S3DF_STATUS_HTTP_TIMEOUT   Per-query timeout sec (default 15)
+  S3DF_SITE_ID               Site id for resources (default s3df)
+  S3DF_STATUS_TLS_VERIFY     true | false | <ca-bundle-path>  (default false)
 """
 
 import datetime
+import json
 import operator
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
 from app.routers.status.models import Resource, ResourceType, Status
 
@@ -43,16 +32,15 @@ def utc_now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-# Placeholder timestamp baked into static Resource templates. The store is the
-# authority for ``last_modified`` and overwrites this when projecting a view.
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
 class Backend(str, Enum):
-    """Metrics backend a health check queries."""
+    """Backend/source a health check queries."""
 
     prometheus = "prometheus"
     influxdb = "influxdb"
+    http = "http"
 
 
 _COMPARATORS: dict[str, Callable[[float, float], bool]] = {
@@ -67,42 +55,41 @@ _COMPARATORS: dict[str, Callable[[float, float], bool]] = {
 
 @dataclass(frozen=True)
 class Condition:
-    """A comparison of an observed metric value against a threshold."""
+    """A comparison of an observed value against a threshold."""
 
     comparator: str
     value: float
 
-    def met(self, observed: float) -> bool:
-        op = _COMPARATORS.get(self.comparator)
-        if op is None:
+    def __post_init__(self) -> None:
+        if self.comparator not in _COMPARATORS:
             raise ValueError(f"Unknown comparator: {self.comparator}")
-        return bool(op(observed, self.value))
+
+    def met(self, observed: float) -> bool:
+        return bool(_COMPARATORS[self.comparator](observed, self.value))
 
 
 @dataclass(frozen=True)
 class HealthCheck:
-    """How to determine a resource's status from a metrics backend."""
+    """How to determine a resource's status from an IRI-owned source."""
 
     backend: Backend
-    query: str
-    up_when: Condition
-    db_name: str | None = None  # InfluxDB only
+    name: str | None = None
+    query: str | None = None
+    up_when: Condition = field(default_factory=lambda: Condition("eq", 1.0))
+    db_name: str | None = None
     degraded_when: Condition | None = None
+    url: str | None = None
+    method: str = "GET"
+    headers: dict[str, str] = field(default_factory=dict)
+    follow_redirects: bool = True
 
 
 @dataclass(frozen=True)
 class MonitoredResource:
-    """Pairs a static ``Resource`` template with the health check driving it.
-
-    The ``Resource`` carries the resource's stable identity/metadata exactly
-    once. Its dynamic fields (``current_status``, ``last_modified``,
-    ``site_id``) are placeholders that the store overlays when it builds the
-    live view, which is what lets us avoid a separate ``ResourceDef`` that would
-    otherwise re-list the same fields.
-    """
+    """Pairs a static Resource template with the health checks driving it."""
 
     resource: Resource
-    health_check: HealthCheck
+    health_checks: tuple[HealthCheck, ...] = ()
 
 
 def _template(
@@ -114,14 +101,13 @@ def _template(
     resource_type: ResourceType,
     capability_ids: tuple[str, ...] = (),
 ) -> Resource:
-    """Build a static Resource template. Dynamic fields are placeholders the
-    store overwrites (``current_status``, ``last_modified``, ``site_id``)."""
+    """Build a static Resource template. The store overwrites dynamic fields."""
     return Resource(
         id=id,
         name=name,
         description=description,
         last_modified=_EPOCH,
-        site_id="",  # overlaid by the store from settings.site_id
+        site_id="",
         group=group,
         resource_type=resource_type,
         current_status=Status.unknown,
@@ -129,33 +115,101 @@ def _template(
     )
 
 
-# The set of S3DF resources surfaced by /status. Queries mirror those exercised
-# by status-pusher's live tests (see status-pusher/Makefile). Extend as needed.
-REGISTRY: list[MonitoredResource] = [
-    MonitoredResource(
-        resource=_template(
-            id="s3df-ssh-gateway",
-            name="SSH Login Gateway",
-            description="S3DF interactive SSH login gateway reachability.",
-            group="access",
-            resource_type=ResourceType.service,
-        ),
-        health_check=HealthCheck(
+RESOURCE_TEMPLATES: tuple[Resource, ...] = (
+    _template(
+        id="s3df-ssh-bastions",
+        name="SSH Bastions",
+        description="S3DF SSH bastion hosts for command-line access.",
+        group="access",
+        resource_type=ResourceType.service,
+    ),
+    _template(
+        id="s3df-interactive-nodes",
+        name="Interactive Nodes",
+        description="S3DF interactive login and analysis nodes.",
+        group="compute",
+        resource_type=ResourceType.compute,
+    ),
+    _template(
+        id="s3df-docs",
+        name="S3DF Docs",
+        description="S3DF user documentation site.",
+        group="documentation",
+        resource_type=ResourceType.website,
+    ),
+    _template(
+        id="s3df-batch-servers",
+        name="Batch Servers",
+        description="S3DF batch submission and scheduling servers.",
+        group="compute",
+        resource_type=ResourceType.compute,
+    ),
+    _template(
+        id="s3df-slurm",
+        name="Slurm",
+        description="S3DF Slurm workload management service.",
+        group="compute",
+        resource_type=ResourceType.service,
+    ),
+    _template(
+        id="s3df-monitoring",
+        name="Monitoring",
+        description="S3DF monitoring and observability services.",
+        group="operations",
+        resource_type=ResourceType.service,
+    ),
+    _template(
+        id="s3df-coact",
+        name="Coact",
+        description="S3DF Coact allocation and account service.",
+        group="accounts",
+        resource_type=ResourceType.service,
+    ),
+    _template(
+        id="s3df-ondemand",
+        name="OnDemand",
+        description="S3DF Open OnDemand web service.",
+        group="access",
+        resource_type=ResourceType.website,
+    ),
+    _template(
+        id="s3df-kubernetes",
+        name="Kubernetes",
+        description="S3DF Kubernetes platform.",
+        group="platform",
+        resource_type=ResourceType.system,
+    ),
+    _template(
+        id="s3df-storage",
+        name="Storage",
+        description="S3DF storage services.",
+        group="storage",
+        resource_type=ResourceType.storage,
+    ),
+    _template(
+        id="s3df-dtns",
+        name="DTNs",
+        description="S3DF data transfer nodes.",
+        group="data-transfer",
+        resource_type=ResourceType.network,
+    ),
+)
+
+RESOURCE_IDS = {resource.id for resource in RESOURCE_TEMPLATES}
+
+BUILTIN_CHECKS: dict[str, tuple[HealthCheck, ...]] = {
+    "s3df-ssh-bastions": (
+        HealthCheck(
             backend=Backend.prometheus,
+            name="ssh-bastion-port-state",
             query="avg( avg_over_time(nmap_port_state{service=`ssh`,group=`s3df`}[5m]) )",
             up_when=Condition("eq", 1.0),
         ),
     ),
-    MonitoredResource(
-        resource=_template(
-            id="s3df-slurmctld",
-            name="Slurm Controller (slurmctld)",
-            description="Slurm workload manager controller daemon health.",
-            group="compute",
-            resource_type=ResourceType.compute,
-        ),
-        health_check=HealthCheck(
+    "s3df-slurm": (
+        HealthCheck(
             backend=Backend.influxdb,
+            name="slurmctld-process",
             db_name="telegraf",
             query=(
                 'SELECT mean("status_code") FROM "monit_process" '
@@ -163,17 +217,9 @@ REGISTRY: list[MonitoredResource] = [
             ),
             up_when=Condition("eq", 1.0),
         ),
-    ),
-    MonitoredResource(
-        resource=_template(
-            id="s3df-slurmdbd",
-            name="Slurm DB Daemon (slurmdbd)",
-            description="Slurm accounting database daemon health.",
-            group="compute",
-            resource_type=ResourceType.compute,
-        ),
-        health_check=HealthCheck(
+        HealthCheck(
             backend=Backend.influxdb,
+            name="slurmdbd-process",
             db_name="telegraf",
             query=(
                 'SELECT mean("status_code") FROM "monit_process" '
@@ -182,7 +228,23 @@ REGISTRY: list[MonitoredResource] = [
             up_when=Condition("eq", 1.0),
         ),
     ),
-]
+}
+
+
+def build_registry(settings: "StatusSettings | None" = None) -> list[MonitoredResource]:
+    """Build monitored resources with built-in plus configured checks."""
+    configured = settings.resource_checks if settings is not None else {}
+    return [
+        MonitoredResource(
+            resource=resource,
+            health_checks=BUILTIN_CHECKS.get(resource.id, ()) + configured.get(resource.id, ()),
+        )
+        for resource in RESOURCE_TEMPLATES
+    ]
+
+
+# Static default registry for tests/importers that do not need env-driven checks.
+REGISTRY: list[MonitoredResource] = build_registry()
 
 
 class StatusSettings:
@@ -192,6 +254,7 @@ class StatusSettings:
         self.prometheus_url = os.getenv("S3DF_PROMETHEUS_URL", "https://prometheus.slac.stanford.edu")
         self.influxdb_url = os.getenv("S3DF_INFLUXDB_URL", "https://influxdb.slac.stanford.edu")
         self.influxdb_db = os.getenv("S3DF_INFLUXDB_DB", "telegraf")
+        self.resource_checks = self._parse_resource_checks(os.getenv("S3DF_STATUS_CHECKS_JSON", "{}"))
         self.poll_interval = int(os.getenv("S3DF_STATUS_POLL_INTERVAL", "60"))
         self.http_timeout = float(os.getenv("S3DF_STATUS_HTTP_TIMEOUT", "15"))
         # NOTE: the /facility adapter currently mints a random site uuid per
@@ -207,5 +270,79 @@ class StatusSettings:
             return True
         if low in ("false", "0", "no", "off", ""):
             return False
-        # Anything else is treated as a path to a CA bundle.
         return raw
+
+    @classmethod
+    def _parse_resource_checks(cls, raw: str) -> dict[str, tuple[HealthCheck, ...]]:
+        raw = raw.strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("S3DF_STATUS_CHECKS_JSON must be valid JSON") from exc
+        if not isinstance(data, dict):
+            raise ValueError("S3DF_STATUS_CHECKS_JSON must be an object keyed by resource id")
+
+        parsed: dict[str, tuple[HealthCheck, ...]] = {}
+        for resource_id, checks in data.items():
+            if resource_id not in RESOURCE_IDS:
+                raise ValueError(f"Unknown S3DF status resource id in S3DF_STATUS_CHECKS_JSON: {resource_id}")
+            if not isinstance(checks, list):
+                raise ValueError(f"Checks for {resource_id} must be a list")
+            parsed[resource_id] = tuple(cls._parse_check(resource_id, idx, check) for idx, check in enumerate(checks))
+        return parsed
+
+    @classmethod
+    def _parse_check(cls, resource_id: str, idx: int, raw: Any) -> HealthCheck:
+        if not isinstance(raw, dict):
+            raise ValueError(f"Check {idx} for {resource_id} must be an object")
+        try:
+            backend = Backend(raw["backend"])
+        except KeyError as exc:
+            raise ValueError(f"Check {idx} for {resource_id} is missing backend") from exc
+        except ValueError as exc:
+            raise ValueError(f"Check {idx} for {resource_id} has unsupported backend: {raw.get('backend')}") from exc
+
+        up_when = cls._parse_condition(raw.get("up_when"), default=Condition("eq", 200.0 if backend == Backend.http else 1.0))
+        degraded_when = cls._parse_condition(raw.get("degraded_when"), default=None)
+        headers = raw.get("headers", {})
+        if headers is None:
+            headers = {}
+        if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+            raise ValueError(f"Check {idx} for {resource_id} has invalid headers")
+
+        check = HealthCheck(
+            backend=backend,
+            name=raw.get("name"),
+            query=raw.get("query"),
+            up_when=up_when,
+            db_name=raw.get("db_name"),
+            degraded_when=degraded_when,
+            url=raw.get("url"),
+            method=str(raw.get("method", "GET")).upper(),
+            headers=headers,
+            follow_redirects=bool(raw.get("follow_redirects", True)),
+        )
+        cls._validate_check(resource_id, idx, check)
+        return check
+
+    @staticmethod
+    def _parse_condition(raw: Any, default: Condition | None) -> Condition | None:
+        if raw is None:
+            return default
+        if not isinstance(raw, dict):
+            raise ValueError("condition must be an object")
+        try:
+            comparator = raw["comparator"]
+            value = raw["value"]
+        except KeyError as exc:
+            raise ValueError("condition requires comparator and value") from exc
+        return Condition(str(comparator), float(value))
+
+    @staticmethod
+    def _validate_check(resource_id: str, idx: int, check: HealthCheck) -> None:
+        if check.backend in (Backend.prometheus, Backend.influxdb) and not check.query:
+            raise ValueError(f"Check {idx} for {resource_id} requires query")
+        if check.backend == Backend.http and not check.url:
+            raise ValueError(f"Check {idx} for {resource_id} requires url")

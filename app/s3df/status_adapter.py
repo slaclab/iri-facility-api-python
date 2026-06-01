@@ -1,19 +1,18 @@
 """
 SLAC S3DF Status Adapter for the IRI Facility API.
 
-Serves the IRI ``/status`` router (resources, events, incidents) from live
-health checks against S3DF monitoring infrastructure — Prometheus and InfluxDB
-(telegraf) — the same backends the standalone ``status-pusher`` tool queries.
+Serves the IRI ``/status`` router (resources, events, incidents) from
+IRI-owned periodic health checks and a local in-memory status cache.
 
 Design (see design-docs/s3df-status-adapter.md):
 
-  * Resources are STATIC config (``app.s3df.status.config.REGISTRY``). Each
-    pairs an IRI ``Resource`` template with a health check (backend + query +
-    condition) — mirroring the success-criterion model used by ``status-pusher``.
+  * Resources are STATIC config (``app.s3df.status.config``). Each pairs an IRI
+    ``Resource`` template with zero or more health checks. Built-in checks are
+    merged with optional ``S3DF_STATUS_CHECKS_JSON`` checks at adapter startup.
   * A background poller (``app.s3df.status.poller``) runs every
-    ``S3DF_STATUS_POLL_INTERVAL`` seconds, queries each resource's backend, maps
-    the result to a Status (up/down/degraded/unknown), and records it in an
-    in-memory store (``app.s3df.status.store``).
+    ``S3DF_STATUS_POLL_INTERVAL`` seconds, queries each resource's configured
+    sources, maps the aggregate result to a Status (up/down/degraded/unknown),
+    and records it in an in-memory store (``app.s3df.status.store``).
   * The store detects status TRANSITIONS to emit Events and to open/close
     unplanned Incidents.
 
@@ -35,7 +34,7 @@ import logging
 from app.routers.status import facility_adapter as status_adapter
 from app.routers.status import models as status_models
 
-from .status.config import REGISTRY, MonitoredResource, StatusSettings
+from .status.config import MonitoredResource, StatusSettings, build_registry
 from .status.poller import StatusPoller
 from .status.store import StatusStore
 
@@ -51,7 +50,7 @@ def _paginate(items: list, offset: int | None, limit: int | None) -> list:
 
 
 class S3DFStatusAdapter(status_adapter.FacilityAdapter):
-    """IRI status FacilityAdapter backed by live S3DF health checks.
+    """IRI status FacilityAdapter backed by internal S3DF health checks.
 
     Implements every method called by the IRI status router:
       get_resources, get_resource, get_events, get_event,
@@ -66,7 +65,7 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         monitored: list[MonitoredResource] | None = None,
     ):
         self._settings = settings or StatusSettings()
-        self._monitored = monitored if monitored is not None else REGISTRY
+        self._monitored = monitored if monitored is not None else build_registry(self._settings)
         self._store = StatusStore(
             site_id=self._settings.site_id,
             resources=[m.resource for m in self._monitored],

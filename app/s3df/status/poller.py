@@ -1,7 +1,7 @@
 """
 Background poller for the S3DF status adapter.
 
-Periodically runs the health check for each monitored resource and feeds the
+Periodically runs the health checks for each monitored resource and feeds the
 results into the :class:`~app.s3df.status.store.StatusStore`. The ``httpx``
 client is created lazily inside the running event loop (see :meth:`start`).
 """
@@ -56,7 +56,7 @@ class StatusPoller:
         assert self._checker is not None
         monitored = self.monitored
         results = await asyncio.gather(
-            *(self._checker.check(m.health_check) for m in monitored),
+            *(self._checker.check(m.health_checks) for m in monitored),
             return_exceptions=True,
         )
         for m, res in zip(monitored, results):

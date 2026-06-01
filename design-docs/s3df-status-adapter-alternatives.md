@@ -49,7 +49,7 @@ status and history actually live?"** Everything below is organized around that.
 | **A** | Background poller + in-memory store *(current/as-built)* | none (RAM read) | process memory | none | ❌ diverges ×8 |
 | **B** | On-demand query + TTL cache | backend on cache-miss | nowhere (current only) | none | ⚠️ current-only |
 | **C** | **Prometheus as source of truth** + thin TTL cache | 1–2 Prom queries / miss | Prometheus TSDB | none | ✅ all read same TSDB |
-| **D** | Read existing `s3df-status` git logs | git pull (cached) | git CSV logs | none | ✅ shared clone |
+| **D** | Read dashboard git logs *(rejected)* | git pull (cached) | git CSV logs | none | ✅ shared clone |
 | **E** | **Proxy Alertmanager** (incidents) + Prom instant (status) | Alertmanager / Prom | Alertmanager | none\* | ✅ |
 | **F** | Single poller → shared Redis/SQLite, workers read | cache read | shared store | Redis/SQLite | ✅ |
 
@@ -133,19 +133,19 @@ from it instead of re-implementing a store:
   resolution and retention**; incident IDs must be derived deterministically (not
   random) to stay stable across workers and refreshes.
 
-### D — Reuse the existing `s3df-status` git logs
+### D — Reuse dashboard git logs (rejected)
 
-`status-pusher` already writes append-only CSV health logs to
-`slaclab/s3df-status` (consumed by the Fettle dashboard). The adapter could clone/
-pull that repo and parse the logs.
+The dashboard pipeline writes append-only CSV health logs that are consumed by
+the S3DF status site. The adapter could clone/pull that repo and parse the logs.
 
 - **Pros:** zero new backend access; reuses a pipeline that already runs;
   worker-consistent via a shared clone; history already persisted in git.
 - **Cons:** git-pull latency on refresh; a thin point-in-time `ts,status,value`
   data model with **no native incident semantics** (would still need a transition
   fold like C, but over coarser data); couples IRI to the dashboard's repo layout.
-- **Verdict:** lower-fidelity than C for the same amount of fold logic; best only
-  if direct Prometheus/InfluxDB access from the API is not permitted.
+- **Verdict:** rejected for IRI runtime use. IRI must remain decoupled from
+  `status-pusher`, `s3df-status`, and dashboard log repositories; direct
+  IRI-configured checks are the supported polling source.
 
 ### E — Proxy Alertmanager for incidents (best incident fidelity)
 
