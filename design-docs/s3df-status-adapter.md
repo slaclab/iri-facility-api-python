@@ -327,3 +327,260 @@ app/s3df/
 - `prometheus-api-client` (already used by status-pusher)
 - `httpx` (async HTTP for InfluxDB queries — preferred over sync `requests` in async app)
 - No new external services required; uses existing Prometheus + InfluxDB infrastructure
+
+---
+
+> **As-built addendum.** Sections 11–12 below describe the logic actually
+> implemented in `app/s3df/status_adapter.py`. The adapter ships as a **single
+> file** (registry + health checker + store + poller + adapter class), not the
+> multi-module layout sketched in sections 5/8. Prometheus is queried directly
+> over its HTTP API via `httpx` (the `prometheus-api-client` dependency was not
+> needed).
+
+## 11. Status Computation (As Built)
+
+### 11.1 End-to-end pipeline
+
+A resource's `current_status` is derived once per poll cycle by turning a single
+scalar metric into one of four `Status` values. The same pipeline runs for every
+resource in `RESOURCE_REGISTRY`.
+
+```
+  ResourceDef.health_check
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │ backend (prometheus|influxdb) + query + up_when [+ degraded_when]      │
+  └───────────────────────────────────────────────────────────────────────┘
+            │
+            ▼  HealthChecker.check()
+   ┌──────────────────┐     query backend over httpx (timeout-bounded)
+   │  Prometheus       │──►  GET /api/v1/query?query=...
+   │   or InfluxDB     │──►  GET /query?q=...&db=...
+   └──────────────────┘
+            │
+            ▼  parse a single scalar
+        value: float | None        (None = empty result / parse miss)
+            │
+            ▼  evaluate(check, value)
+        ┌───────────────────────────┐
+        │  Status:                  │
+        │   up | degraded | down |  │
+        │   unknown                 │
+        └───────────────────────────┘
+            │
+            ▼  StatusStore.record(resource_id, HealthResult)
+     update current_status, emit Event on change, open/close Incident
+```
+
+### 11.2 Value → Status rule
+
+`evaluate()` applies the resource's conditions in a fixed precedence. A
+`Condition` is just a comparator (`eq/ne/lt/lte/gt/gte`) applied to the observed
+value against a threshold — the same success-criterion idea `status-pusher` uses.
+
+```
+  value is None  ───────────────────────────────►  UNKNOWN
+        │  (query failed, errored, empty result,
+        │   or backend mapped to no scalar)
+        ▼
+  up_when.met(value)?  ── yes ──────────────────►  UP
+        │ no
+        ▼
+  degraded_when set AND degraded_when.met(value)? ─ yes ──►  DEGRADED
+        │ no
+        ▼
+                                                    DOWN
+```
+
+Notes:
+- **`unknown` ≠ `down`.** Any exception during the query (timeout, TLS, HTTP
+  error, malformed JSON) is caught and mapped to `unknown`, *not* `down`. A
+  monitoring-plane failure is not treated as a confirmed resource outage.
+- **`degraded` is optional.** Resources that only define `up_when` collapse to a
+  binary up/down model (matching `status-pusher`). `degraded_when` is the hook
+  for a future third threshold.
+- The registry currently uses `up_when = (value == 1.0)` for all resources
+  (nmap port state for SSH; monit `status_code` for slurmctld/slurmdbd).
+
+### 11.3 Transition detection & events
+
+The store is **change-driven**: `record()` compares the new status to the
+resource's previous status and does nothing on a steady state. Events are emitted
+only on a real change, which keeps the event log meaningful instead of one row
+per poll.
+
+```
+  poll cycle N:   prev = store.current_status[r]
+                  new  = result.status
+
+      prev == new  ────────────────►  no-op (steady state)
+
+      prev != new  ────────────────►  emit Event(occurred_at = poll time,
+                                                  status = new)
+                                       + drive incident state machine (11.4)
+
+  Special case: prev is None (first ever observation)
+      → "baseline" Event describing the initial status
+      → if initial status is down/degraded, an incident is ALSO opened
+        (its start time is the first-observed time, not the true outage start)
+```
+
+Example for one resource over six polls:
+
+```
+  poll:   1     2     3     4     5     6
+  status: up    up    down  down  up    unknown
+  event:  base  —     E1    —     E2    E3
+                      ▲           ▲     ▲
+                      │           │     └ up→unknown (incident stays open? no —
+                      │           │       it was already closed at poll 5)
+                      │           └ down→up  (closes incident, resolution=completed)
+                      └ up→down   (opens unplanned incident)
+```
+
+### 11.4 Incident lifecycle (state machine)
+
+At most **one open incident per resource**. Incidents are auto-created as
+`unplanned`. The driving signal is the resource's status transition:
+
+```
+                       ┌───────────────────────────────────────────┐
+                       │                                           │
+        up / (start)   │                                           │
+   ───────────────►  (NO OPEN INCIDENT)                            │
+                       │   │                                       │
+        down|degraded  │   │  down|degraded                        │ up
+                       │   ▼                                       │
+                     (OPEN: unplanned, resolution=unresolved)      │
+                       │   │   ▲                                   │
+            down⇄degraded   │   │ down|degraded (escalate:         │
+        (update incident    │   │   update incident.status only)   │
+         status + mtime)    │   └───────────────────────────────  │
+                       │   │                                       │
+                       │   │  up  ─────────────────────────────────┘
+                       │   ▼     close: end=now,
+                       │  (CLOSED: resolution=completed, status=up)
+                       │
+        unknown ───────┘  (incident is LEFT OPEN; only an event is recorded —
+                           a backend failure must not auto-resolve an outage)
+```
+
+Concretely, in `record()`:
+- **→ down/degraded:** open a new incident if none is open for the resource;
+  otherwise update the existing incident's `status`. Link the new event to the
+  incident (`event.incident_id`, `incident.event_ids`).
+- **→ up:** pop and close the open incident (`end`, `resolution=completed`,
+  `status=up`), linking the closing event.
+- **→ unknown:** record the event only; never opens or closes an incident.
+
+### 11.5 Polling cadence & lazy start
+
+IRI constructs adapters **synchronously at import time**, before the asyncio loop
+exists, so the poller cannot start in `__init__`. Instead it starts lazily on the
+first request, guarded by a double-checked `asyncio.Lock`.
+
+```
+  import time            first request (loop running)        steady state
+  ───────────────►       ─────────────────────────►          ───────────►
+
+  __init__:              _ensure_started():                  background task:
+   build store,           async with start_lock:              loop forever:
+   poller, lock           if not started:                       sleep(interval)
+   (NO network,            • create httpx.AsyncClient            poll_once()
+    NO task)               • await poll_once()  ◄─ initial         └ gather all
+                              (populates store so the              checks, record
+                               first response isn't empty)
+                            • create_task(_run())
+                            • started = True
+                          ── request proceeds, reads store ──
+```
+
+- The **initial poll is awaited** under the lock, so the very first
+  `/status/...` response reflects real data rather than all-`unknown`. Its cost is
+  bounded by per-query `S3DF_STATUS_HTTP_TIMEOUT`, and `check()` never raises
+  (failures become `unknown`).
+- All resource checks within a cycle run concurrently via `asyncio.gather`.
+- `aclose()` cancels the loop and closes the HTTP client (for tests / future
+  FastAPI-lifespan wiring).
+
+## 12. Limitations & Known Trade-offs
+
+These are intentional simplifications for a first reviewable implementation. Each
+has a clear upgrade path.
+
+### 12.1 Volatile, per-process state
+
+State (current status, events, incidents) lives in plain Python structures. It is
+**lost on restart** and **diverges across uvicorn workers** — each worker polls
+independently and mints its own incident/event UUIDs, so a client may see
+different histories depending on which worker answers.
+
+```
+        ┌── worker A ──┐        ┌── worker B ──┐
+        │ store_A      │        │ store_B      │
+        │ inc id=abc   │   ≠    │ inc id=xyz   │   ← same outage, different ids
+        └──────────────┘        └──────────────┘
+   GET /status/incidents → load-balanced → answer depends on worker
+```
+
+Upgrade path: shared store (SQLite/Redis/Postgres) or a single dedicated poller
+process writing a store the API workers only read.
+
+### 12.2 Single sample, no flap suppression
+
+Status is decided from **one** sample per cycle with no debounce/hysteresis. A
+single transient bad scrape flips the resource and generates an event/incident;
+the next good poll closes it. A flapping metric produces incident churn.
+
+```
+  value:  1   1   0   1   0   1     (0 = "bad" scrape)
+  status: up  up  dn  up  dn  up
+  events:     —   E   E   E   E     ← four events, two short incidents
+```
+
+Upgrade path: require N consecutive failures before opening (and N successes
+before closing), or evaluate over a rolling window.
+
+### 12.3 `unknown` and unknown outage-start
+
+- A backend/query failure yields `unknown`, which deliberately does **not** close
+  an open incident — but a long backend outage will leave a resource pinned at
+  `unknown` with no incident of its own.
+- When a resource is **already down at first observation**, the incident `start`
+  is set to *first-observed time*, which is not the true outage start (the
+  adapter has no history before it booted).
+
+### 12.4 Simplistic query → scalar reduction
+
+Each backend response is reduced to a single number: Prometheus
+`data.result[0].value[1]`, InfluxDB `series[0].values[-1][1]`. Queries that return
+multiple series / grouped results (e.g. `GROUP BY service`) only have their
+**first** series considered. Health checks must be written to return a single
+series. There is no "any/all/aggregate across series" policy yet.
+
+### 12.5 Scope gaps
+
+- **No planned incidents.** All incidents are `unplanned`; there is no ingestion
+  of maintenance windows (`planned` / `reservation`). Planned-maintenance support
+  needs a schedule source (config or API).
+- **`site_id` is not a guaranteed cross-reference.** Resources carry
+  `S3DF_SITE_ID` (default `"s3df"`), but the `/facility` adapter currently mints a
+  random site UUID per process, so `Resource.site_uri` may not resolve to a real
+  site until a stable site id is wired through.
+- **Resource set is minimal.** Only SSH gateway + slurmctld + slurmdbd are
+  registered today; the full S3DF resource catalogue (storage, network, web
+  services, …) still needs to be enumerated.
+
+### 12.6 Operational
+
+- **Unbounded event growth.** The event log is append-only and never trimmed;
+  a long-lived process accumulates events in memory. Needs retention/eviction
+  (or persistence with TTL).
+- **First-request latency.** The first caller after startup pays the awaited
+  initial poll (up to `S3DF_STATUS_HTTP_TIMEOUT` per backend round).
+- **TLS verification defaults off.** `S3DF_STATUS_TLS_VERIFY` defaults to `false`
+  (SLAC internal CA convenience); set it to `true` or a CA-bundle path in
+  production.
+- **No automatic shutdown wiring.** `aclose()` exists but the framework does not
+  call it; wiring it into FastAPI's lifespan is a follow-up so the poller task and
+  HTTP client are closed cleanly on shutdown.
+
