@@ -63,7 +63,7 @@ The first `/status/...` request starts the poller lazily and awaits one initial 
 
 ## Health checks
 
-Each resource has zero or more checks. A check produces a scalar value and an evaluation rule:
+Each resource must have one or more checks in the default production configuration. A check produces a scalar value and an evaluation rule:
 
 ```text
 observed value + up condition + optional degraded condition -> Status
@@ -82,13 +82,13 @@ Built-in checks:
 - `SSH Bastions`: Prometheus query `avg( avg_over_time(nmap_port_state{service=\`ssh\`,group=\`s3df\`}[5m]) )`, `eq 1`.
 - `Slurm`: aggregate InfluxDB `monit_process` checks for `slurmctld` and `slurmdbd`, each `eq 1`.
 
-Other resources can receive live status through IRI configuration.
+The remaining resources receive live status through IRI configuration. If strict coverage is enabled, startup fails until each canonical resource has at least one built-in or configured check.
 
 ## Check aggregation
 
 Multiple checks for one resource are aggregated into one `Resource.current_status`:
 
-- no checks -> `unknown`
+- no checks -> configuration error by default; `unknown` only in explicit non-strict development/test mode
 - all checks `unknown` -> `unknown`
 - any known check `down` -> `down`
 - otherwise, any known check `degraded` -> `degraded`
@@ -96,9 +96,11 @@ Multiple checks for one resource are aggregated into one `Resource.current_statu
 
 Unknown checks are ignored when at least one check produced a usable signal. This prevents a transient probe failure from creating a false outage if another check confirms the resource is healthy.
 
-## Configuring additional live checks
+## Configuring live checks
 
-Use `S3DF_STATUS_CHECKS_JSON` to attach IRI-owned checks to any canonical resource id. Configured checks are appended to built-in checks.
+Use `S3DF_STATUS_CHECKS_FILE` and/or `S3DF_STATUS_CHECKS_JSON` to attach IRI-owned checks to any canonical resource id. Configured checks are appended to built-in checks. File config is read first, then inline JSON is appended.
+
+Strict full coverage is enabled by default through `S3DF_STATUS_REQUIRE_FULL_COVERAGE=true`. In that mode, IRI fails startup/configuration if any canonical resource has no checks. Setting `S3DF_STATUS_REQUIRE_FULL_COVERAGE=false` is intended only for development and tests where missing probes should be shown as `unknown`.
 
 Example:
 
@@ -132,13 +134,15 @@ Example:
 }
 ```
 
-Invalid configuration raises an explicit startup/configuration error rather than silently dropping a check. Resources with no built-in or configured checks remain visible with `current_status=unknown`.
+Invalid configuration raises an explicit startup/configuration error rather than silently dropping a check. In strict mode, resources with no built-in or configured checks also raise an explicit error rather than being served as hard-coded `unknown`.
 
 ## Configuration
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `S3DF_STATUS_CHECKS_JSON` | JSON mapping resource ids to extra health checks | `{}` |
+| `S3DF_STATUS_REQUIRE_FULL_COVERAGE` | Require every canonical resource to have at least one check | `true` |
+| `S3DF_STATUS_CHECKS_FILE` | JSON file mapping resource ids to extra health checks | unset |
+| `S3DF_STATUS_CHECKS_JSON` | Inline JSON mapping resource ids to extra health checks | `{}` |
 | `S3DF_STATUS_POLL_INTERVAL` | Seconds between poll cycles | `60` |
 | `S3DF_STATUS_HTTP_TIMEOUT` | Per-request timeout in seconds | `15` |
 | `S3DF_SITE_ID` | Site id stamped onto returned resources | `s3df` |

@@ -7,8 +7,10 @@ IRI-owned periodic health checks and a local in-memory status cache.
 Design (see design-docs/s3df-status-adapter.md):
 
   * Resources are STATIC config (``app.s3df.status.config``). Each pairs an IRI
-    ``Resource`` template with zero or more health checks. Built-in checks are
-    merged with optional ``S3DF_STATUS_CHECKS_JSON`` checks at adapter startup.
+    ``Resource`` template with one or more health checks. Built-in checks are
+    merged with optional ``S3DF_STATUS_CHECKS_FILE`` and
+    ``S3DF_STATUS_CHECKS_JSON`` checks at adapter startup; full coverage is
+    required by default.
   * A background poller (``app.s3df.status.poller``) runs every
     ``S3DF_STATUS_POLL_INTERVAL`` seconds, queries each resource's configured
     sources, maps the aggregate result to a Status (up/down/degraded/unknown),

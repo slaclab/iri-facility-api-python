@@ -14,6 +14,7 @@ from app.s3df.status.config import (
     RESOURCE_TEMPLATES,
     StatusSettings,
     build_registry,
+    missing_check_resources,
 )
 from app.s3df.status.health_checker import HealthChecker, HealthResult, aggregate_results
 from app.s3df.status.store import StatusStore
@@ -51,8 +52,30 @@ EXPECTED_IDS = [
 NOW = datetime.datetime(2026, 6, 1, 13, 0, tzinfo=datetime.timezone.utc)
 
 
-def _settings(monkeypatch: pytest.MonkeyPatch) -> StatusSettings:
+def _clear_status_check_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("S3DF_STATUS_CHECKS_FILE", raising=False)
     monkeypatch.delenv("S3DF_STATUS_CHECKS_JSON", raising=False)
+    monkeypatch.delenv("S3DF_STATUS_REQUIRE_FULL_COVERAGE", raising=False)
+
+
+def _full_coverage_config() -> dict[str, list[dict[str, object]]]:
+    builtin_ids = {"s3df-ssh-bastions", "s3df-slurm"}
+    return {
+        resource.id: [
+            {
+                "backend": "http",
+                "name": f"{resource.id}-status",
+                "url": f"https://status.example/{resource.id}",
+                "up_when": {"comparator": "eq", "value": 200},
+            }
+        ]
+        for resource in RESOURCE_TEMPLATES
+        if resource.id not in builtin_ids
+    }
+
+
+def _settings(monkeypatch: pytest.MonkeyPatch) -> StatusSettings:
+    _clear_status_check_env(monkeypatch)
     settings = StatusSettings()
     settings.prometheus_url = "https://prometheus.example"
     settings.influxdb_url = "https://influx.example"
@@ -70,6 +93,29 @@ def test_registry_matches_s3df_status_resources():
     assert [check.backend for check in checks_by_id["s3df-ssh-bastions"]] == [Backend.prometheus]
     assert [check.backend for check in checks_by_id["s3df-slurm"]] == [Backend.influxdb, Backend.influxdb]
     assert all(not checks for id_, checks in checks_by_id.items() if id_ not in {"s3df-ssh-bastions", "s3df-slurm"})
+
+
+def test_build_registry_requires_full_coverage_by_default(monkeypatch):
+    _clear_status_check_env(monkeypatch)
+
+    with pytest.raises(ValueError, match="S3DF status resources missing health checks") as exc_info:
+        build_registry(StatusSettings())
+
+    assert "s3df-interactive-nodes" in str(exc_info.value)
+    assert "S3DF_STATUS_CHECKS_FILE" in str(exc_info.value)
+
+
+def test_build_registry_allows_missing_checks_only_when_explicitly_non_strict(monkeypatch):
+    _clear_status_check_env(monkeypatch)
+    monkeypatch.setenv("S3DF_STATUS_REQUIRE_FULL_COVERAGE", "false")
+
+    registry = build_registry(StatusSettings())
+
+    assert [m.resource.id for m in missing_check_resources(registry)] == [
+        resource.id
+        for resource in RESOURCE_TEMPLATES
+        if resource.id not in {"s3df-ssh-bastions", "s3df-slurm"}
+    ]
 
 
 def test_status_log_runtime_configuration_is_not_available(monkeypatch):
@@ -192,6 +238,7 @@ async def test_health_checker_maps_backend_failures_to_unknown(monkeypatch):
 
 
 def test_configured_checks_are_merged_with_builtin_checks(monkeypatch):
+    _clear_status_check_env(monkeypatch)
     monkeypatch.setenv(
         "S3DF_STATUS_CHECKS_JSON",
         json.dumps(
@@ -216,7 +263,7 @@ def test_configured_checks_are_merged_with_builtin_checks(monkeypatch):
         ),
     )
 
-    registry = build_registry(StatusSettings())
+    registry = build_registry(StatusSettings(), require_full_coverage=False)
     checks_by_id = {m.resource.id: m.health_checks for m in registry}
 
     assert checks_by_id["s3df-docs"][0].backend == Backend.http
@@ -228,10 +275,100 @@ def test_configured_checks_are_merged_with_builtin_checks(monkeypatch):
     ]
 
 
+def test_check_file_can_provide_full_coverage(monkeypatch, tmp_path):
+    _clear_status_check_env(monkeypatch)
+    check_file = tmp_path / "s3df-status-checks.json"
+    check_file.write_text(json.dumps(_full_coverage_config()))
+    monkeypatch.setenv("S3DF_STATUS_CHECKS_FILE", str(check_file))
+
+    registry = build_registry(StatusSettings())
+    checks_by_id = {m.resource.id: m.health_checks for m in registry}
+
+    assert not missing_check_resources(registry)
+    assert checks_by_id["s3df-docs"][0].backend == Backend.http
+    assert checks_by_id["s3df-docs"][0].url == "https://status.example/s3df-docs"
+
+
+def test_check_file_and_inline_json_are_merged(monkeypatch, tmp_path):
+    _clear_status_check_env(monkeypatch)
+    check_file = tmp_path / "s3df-status-checks.json"
+    check_file.write_text(
+        json.dumps(
+            {
+                "s3df-docs": [
+                    {
+                        "backend": "http",
+                        "name": "docs-file",
+                        "url": "https://docs.example/from-file",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setenv("S3DF_STATUS_CHECKS_FILE", str(check_file))
+    monkeypatch.setenv(
+        "S3DF_STATUS_CHECKS_JSON",
+        json.dumps(
+            {
+                "s3df-docs": [
+                    {
+                        "backend": "http",
+                        "name": "docs-inline",
+                        "url": "https://docs.example/from-inline",
+                    }
+                ]
+            }
+        ),
+    )
+
+    registry = build_registry(StatusSettings(), require_full_coverage=False)
+    docs_checks = {m.resource.id: m.health_checks for m in registry}["s3df-docs"]
+
+    assert [check.name for check in docs_checks] == ["docs-file", "docs-inline"]
+
+
 def test_invalid_configured_check_resource_id_is_explicit(monkeypatch):
+    _clear_status_check_env(monkeypatch)
     monkeypatch.setenv("S3DF_STATUS_CHECKS_JSON", json.dumps({"s3df-missing": []}))
 
     with pytest.raises(ValueError, match="Unknown S3DF status resource id"):
+        StatusSettings()
+
+
+def test_duplicate_json_keys_are_explicit(monkeypatch):
+    _clear_status_check_env(monkeypatch)
+    monkeypatch.setenv("S3DF_STATUS_CHECKS_JSON", '{"s3df-docs": [], "s3df-docs": []}')
+
+    with pytest.raises(ValueError, match="duplicate key: s3df-docs"):
+        StatusSettings()
+
+
+def test_duplicate_check_names_are_explicit(monkeypatch):
+    _clear_status_check_env(monkeypatch)
+    monkeypatch.setenv(
+        "S3DF_STATUS_CHECKS_JSON",
+        json.dumps(
+            {
+                "s3df-slurm": [
+                    {
+                        "backend": "prometheus",
+                        "name": "slurmctld-process",
+                        "query": "slurm_up",
+                    }
+                ]
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Duplicate S3DF status check name"):
+        build_registry(StatusSettings(), require_full_coverage=False)
+
+
+def test_missing_check_file_is_explicit(monkeypatch):
+    _clear_status_check_env(monkeypatch)
+    monkeypatch.setenv("S3DF_STATUS_CHECKS_FILE", "/does/not/exist.json")
+
+    with pytest.raises(ValueError, match="S3DF_STATUS_CHECKS_FILE could not be read"):
         StatusSettings()
 
 

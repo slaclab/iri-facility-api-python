@@ -10,7 +10,9 @@ Required/optional env vars:
   S3DF_PROMETHEUS_URL        Prometheus base URL   (default https://prometheus.slac.stanford.edu)
   S3DF_INFLUXDB_URL          InfluxDB base URL     (default https://influxdb.slac.stanford.edu)
   S3DF_INFLUXDB_DB           InfluxDB database     (default telegraf)
+  S3DF_STATUS_CHECKS_FILE    JSON file with resource health checks
   S3DF_STATUS_CHECKS_JSON    JSON mapping resource ids to additional health checks
+  S3DF_STATUS_REQUIRE_FULL_COVERAGE  Require every resource to have checks (default true)
   S3DF_STATUS_POLL_INTERVAL  Seconds between polls (default 60)
   S3DF_STATUS_HTTP_TIMEOUT   Per-query timeout sec (default 15)
   S3DF_SITE_ID               Site id for resources (default s3df)
@@ -23,6 +25,7 @@ import operator
 import os
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable
 
 from app.routers.status.models import Resource, ResourceType, Status
@@ -231,16 +234,60 @@ BUILTIN_CHECKS: dict[str, tuple[HealthCheck, ...]] = {
 }
 
 
-def build_registry(settings: "StatusSettings | None" = None) -> list[MonitoredResource]:
+def build_registry(
+    settings: "StatusSettings | None" = None,
+    *,
+    require_full_coverage: bool | None = None,
+) -> list[MonitoredResource]:
     """Build monitored resources with built-in plus configured checks."""
     configured = settings.resource_checks if settings is not None else {}
-    return [
+    monitored = [
         MonitoredResource(
             resource=resource,
             health_checks=BUILTIN_CHECKS.get(resource.id, ()) + configured.get(resource.id, ()),
         )
         for resource in RESOURCE_TEMPLATES
     ]
+    _validate_unique_check_names(monitored)
+
+    strict = require_full_coverage
+    if strict is None:
+        strict = settings.require_full_coverage if settings is not None else False
+    if strict:
+        _validate_full_coverage(monitored)
+
+    return monitored
+
+
+def missing_check_resources(monitored: list[MonitoredResource]) -> list[MonitoredResource]:
+    """Return canonical resources that have no configured health checks."""
+    return [resource for resource in monitored if not resource.health_checks]
+
+
+def _validate_full_coverage(monitored: list[MonitoredResource]) -> None:
+    missing = missing_check_resources(monitored)
+    if not missing:
+        return
+    labels = ", ".join(f"{m.resource.id} ({m.resource.name})" for m in missing)
+    raise ValueError(
+        "S3DF status resources missing health checks: "
+        f"{labels}. Configure checks with S3DF_STATUS_CHECKS_FILE or "
+        "S3DF_STATUS_CHECKS_JSON, or set S3DF_STATUS_REQUIRE_FULL_COVERAGE=false "
+        "only for development/test use."
+    )
+
+
+def _validate_unique_check_names(monitored: list[MonitoredResource]) -> None:
+    for resource in monitored:
+        seen: set[str] = set()
+        for check in resource.health_checks:
+            if check.name is None:
+                continue
+            if check.name in seen:
+                raise ValueError(
+                    f"Duplicate S3DF status check name for {resource.resource.id}: {check.name}"
+                )
+            seen.add(check.name)
 
 
 # Static default registry for tests/importers that do not need env-driven checks.
@@ -254,7 +301,11 @@ class StatusSettings:
         self.prometheus_url = os.getenv("S3DF_PROMETHEUS_URL", "https://prometheus.slac.stanford.edu")
         self.influxdb_url = os.getenv("S3DF_INFLUXDB_URL", "https://influxdb.slac.stanford.edu")
         self.influxdb_db = os.getenv("S3DF_INFLUXDB_DB", "telegraf")
-        self.resource_checks = self._parse_resource_checks(os.getenv("S3DF_STATUS_CHECKS_JSON", "{}"))
+        self.require_full_coverage = self._parse_bool(
+            os.getenv("S3DF_STATUS_REQUIRE_FULL_COVERAGE", "true"),
+            "S3DF_STATUS_REQUIRE_FULL_COVERAGE",
+        )
+        self.resource_checks = self._load_resource_checks()
         self.poll_interval = int(os.getenv("S3DF_STATUS_POLL_INTERVAL", "60"))
         self.http_timeout = float(os.getenv("S3DF_STATUS_HTTP_TIMEOUT", "15"))
         # NOTE: the /facility adapter currently mints a random site uuid per
@@ -262,6 +313,15 @@ class StatusSettings:
         # S3DF_SITE_ID once a stable site identifier is established.
         self.site_id = os.getenv("S3DF_SITE_ID", "s3df")
         self.tls_verify = self._parse_verify(os.getenv("S3DF_STATUS_TLS_VERIFY", "false"))
+
+    @staticmethod
+    def _parse_bool(raw: str, name: str) -> bool:
+        low = raw.strip().lower()
+        if low in ("true", "1", "yes", "on"):
+            return True
+        if low in ("false", "0", "no", "off", ""):
+            return False
+        raise ValueError(f"{name} must be a boolean value")
 
     @staticmethod
     def _parse_verify(raw: str) -> bool | str:
@@ -273,25 +333,70 @@ class StatusSettings:
         return raw
 
     @classmethod
-    def _parse_resource_checks(cls, raw: str) -> dict[str, tuple[HealthCheck, ...]]:
+    def _load_resource_checks(cls) -> dict[str, tuple[HealthCheck, ...]]:
+        checks_file = os.getenv("S3DF_STATUS_CHECKS_FILE")
+        file_checks = cls._parse_resource_checks_file(checks_file)
+        json_checks = cls._parse_resource_checks(
+            os.getenv("S3DF_STATUS_CHECKS_JSON", "{}"),
+            "S3DF_STATUS_CHECKS_JSON",
+        )
+        return cls._merge_resource_checks(file_checks, json_checks)
+
+    @classmethod
+    def _parse_resource_checks_file(cls, checks_file: str | None) -> dict[str, tuple[HealthCheck, ...]]:
+        if not checks_file:
+            return {}
+        path = Path(checks_file)
+        try:
+            raw = path.read_text()
+        except OSError as exc:
+            raise ValueError(f"S3DF_STATUS_CHECKS_FILE could not be read: {checks_file}") from exc
+        return cls._parse_resource_checks(raw, f"S3DF_STATUS_CHECKS_FILE ({checks_file})")
+
+    @staticmethod
+    def _merge_resource_checks(
+        *sources: dict[str, tuple[HealthCheck, ...]],
+    ) -> dict[str, tuple[HealthCheck, ...]]:
+        merged: dict[str, tuple[HealthCheck, ...]] = {}
+        for source in sources:
+            for resource_id, checks in source.items():
+                merged[resource_id] = merged.get(resource_id, ()) + checks
+        return merged
+
+    @classmethod
+    def _parse_resource_checks(cls, raw: str, source: str) -> dict[str, tuple[HealthCheck, ...]]:
         raw = raw.strip()
         if not raw:
             return {}
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError("S3DF_STATUS_CHECKS_JSON must be valid JSON") from exc
+        data = cls._loads_json_object(raw, source)
         if not isinstance(data, dict):
-            raise ValueError("S3DF_STATUS_CHECKS_JSON must be an object keyed by resource id")
+            raise ValueError(f"{source} must be an object keyed by resource id")
 
         parsed: dict[str, tuple[HealthCheck, ...]] = {}
         for resource_id, checks in data.items():
             if resource_id not in RESOURCE_IDS:
-                raise ValueError(f"Unknown S3DF status resource id in S3DF_STATUS_CHECKS_JSON: {resource_id}")
+                raise ValueError(f"Unknown S3DF status resource id in {source}: {resource_id}")
             if not isinstance(checks, list):
                 raise ValueError(f"Checks for {resource_id} must be a list")
-            parsed[resource_id] = tuple(cls._parse_check(resource_id, idx, check) for idx, check in enumerate(checks))
+            parsed[resource_id] = tuple(
+                cls._parse_check(resource_id, idx, check) for idx, check in enumerate(checks)
+            )
         return parsed
+
+    @staticmethod
+    def _loads_json_object(raw: str, source: str) -> Any:
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            data: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in data:
+                    raise ValueError(f"{source} contains duplicate key: {key}")
+                data[key] = value
+            return data
+
+        try:
+            return json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{source} must be valid JSON") from exc
 
     @classmethod
     def _parse_check(cls, resource_id: str, idx: int, raw: Any) -> HealthCheck:
@@ -302,30 +407,67 @@ class StatusSettings:
         except KeyError as exc:
             raise ValueError(f"Check {idx} for {resource_id} is missing backend") from exc
         except ValueError as exc:
-            raise ValueError(f"Check {idx} for {resource_id} has unsupported backend: {raw.get('backend')}") from exc
+            raise ValueError(
+                f"Check {idx} for {resource_id} has unsupported backend: {raw.get('backend')}"
+            ) from exc
 
-        up_when = cls._parse_condition(raw.get("up_when"), default=Condition("eq", 200.0 if backend == Backend.http else 1.0))
+        up_when = cls._parse_condition(
+            raw.get("up_when"),
+            default=Condition("eq", 200.0 if backend == Backend.http else 1.0),
+        )
         degraded_when = cls._parse_condition(raw.get("degraded_when"), default=None)
+        name = cls._optional_str(
+            raw.get("name"),
+            f"Check {idx} for {resource_id} has invalid name",
+        )
+        query = cls._optional_str(
+            raw.get("query"),
+            f"Check {idx} for {resource_id} has invalid query",
+        )
+        db_name = cls._optional_str(
+            raw.get("db_name"),
+            f"Check {idx} for {resource_id} has invalid db_name",
+        )
+        url = cls._optional_str(
+            raw.get("url"),
+            f"Check {idx} for {resource_id} has invalid url",
+        )
+        method = raw.get("method", "GET")
+        if not isinstance(method, str) or not method.strip():
+            raise ValueError(f"Check {idx} for {resource_id} has invalid method")
+        follow_redirects = raw.get("follow_redirects", True)
+        if not isinstance(follow_redirects, bool):
+            raise ValueError(f"Check {idx} for {resource_id} has invalid follow_redirects")
         headers = raw.get("headers", {})
         if headers is None:
             headers = {}
-        if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+        if not isinstance(headers, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
+        ):
             raise ValueError(f"Check {idx} for {resource_id} has invalid headers")
 
         check = HealthCheck(
             backend=backend,
-            name=raw.get("name"),
-            query=raw.get("query"),
+            name=name,
+            query=query,
             up_when=up_when,
-            db_name=raw.get("db_name"),
+            db_name=db_name,
             degraded_when=degraded_when,
-            url=raw.get("url"),
-            method=str(raw.get("method", "GET")).upper(),
+            url=url,
+            method=method.strip().upper(),
             headers=headers,
-            follow_redirects=bool(raw.get("follow_redirects", True)),
+            follow_redirects=follow_redirects,
         )
         cls._validate_check(resource_id, idx, check)
         return check
+
+    @staticmethod
+    def _optional_str(value: Any, error: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(error)
+        return value
 
     @staticmethod
     def _parse_condition(raw: Any, default: Condition | None) -> Condition | None:
