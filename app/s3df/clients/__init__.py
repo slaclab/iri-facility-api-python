@@ -5,11 +5,29 @@ Client libraries for interacting with S3DF services.
 """
 
 from app.s3df.clients.coact import CoactClient, get_coact_client
+from app.s3df.clients.fs_facade import (
+    FsFacadeClient,
+    FsFacadeError,
+    FsFacadeTimeout,
+    get_fs_facade_client,
+)
+from app.s3df.clients.s3df_status_api import (
+    S3DFStatusApiClient,
+    S3DFStatusApiError,
+    get_s3df_status_api_client,
+)
 from app.s3df.clients.user_lookup import UserLookupClient, get_user_lookup_client
 
 __all__ = [
     "CoactClient",
     "get_coact_client",
+    "FsFacadeClient",
+    "FsFacadeError",
+    "FsFacadeTimeout",
+    "get_fs_facade_client",
+    "S3DFStatusApiClient",
+    "S3DFStatusApiError",
+    "get_s3df_status_api_client",
     "UserLookupClient",
     "get_user_lookup_client",
 ]

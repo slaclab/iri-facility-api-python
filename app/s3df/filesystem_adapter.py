@@ -1,26 +1,70 @@
 """
 S3DF Filesystem Adapter
 
-Thin proxy adapter for filesystem operations. Authenticates via Dex JWT,
-enriches with POSIX identity from user-lookup, and will forward requests
-to the filesystem microservice (same endpoints, same data model).
+Forwards every IRI filesystem operation to the ``fs-facade-service``
+microservice, polls the task endpoint until it reaches a terminal state,
+and converts the result into the matching IRI response model.
+
+Authentication: Dex JWT verification (mixin); POSIX identity is fetched
+from user-lookup and attached to the IRI ``User`` object. The user
+identity is not yet forwarded to fs-facade — see TODO below.
+
+See ``fs-facade-service/app/controllers/filesystem_controller.py`` for
+the upstream wire format.
 """
 
+import base64
 import logging
 
 from fastapi import HTTPException
 
 from app.types.user import User
 from app.s3df.auth.authenticated_adapter import S3DFAuthenticatedAdapter
-from app.s3df.clients import get_user_lookup_client
+from app.s3df.clients import (
+    FsFacadeError,
+    FsFacadeTimeout,
+    get_fs_facade_client,
+    get_user_lookup_client,
+)
 from app.routers.filesystem import facility_adapter, models
 from app.routers.status import models as status_models
 
 LOG = logging.getLogger(__name__)
 
 
+async def _fs_call(method: str, path: str, **kwargs):
+    """Submit an op via fs-facade and translate transport/timeout errors to HTTP."""
+    client = get_fs_facade_client()
+    try:
+        return await client.call(method, path, **kwargs)
+    except FsFacadeTimeout as exc:
+        LOG.warning(f"fs-facade timeout on {method} {path}: {exc}")
+        raise HTTPException(status_code=504, detail=f"fs-facade timeout: {exc}") from exc
+    except FsFacadeError as exc:
+        LOG.error(f"fs-facade error on {method} {path}: {exc}")
+        raise HTTPException(status_code=502, detail=f"fs-facade error: {exc}") from exc
+
+
+def _file_model(payload) -> models.File:
+    """Convert a fs-facade File JSON dict into the IRI File model."""
+    if payload is None:
+        raise HTTPException(status_code=502, detail="fs-facade returned no file payload")
+    return models.File.model_validate(payload)
+
+
+def _content_payload(text: str, *, content_type: models.ContentUnit, offset: int = 0) -> models.FileContent:
+    """Wrap raw text from head/tail/view into the IRI FileContent shape."""
+    text = text or ""
+    return models.FileContent(
+        content=text,
+        content_type=content_type,
+        start_position=offset,
+        end_position=offset + len(text),
+    )
+
+
 class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityAdapter):
-    """Filesystem adapter that enforces POSIX identity via user-lookup."""
+    """Filesystem adapter that forwards operations to fs-facade-service."""
 
     async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None) -> User:
         try:
@@ -38,58 +82,209 @@ class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityA
             client_ip=client_ip,
         )
 
-    # --- Filesystem operations (501 until microservice is connected) ---
+    # --- Permissions / ownership ------------------------------------------
 
     async def chmod(self, resource: status_models.Resource, user: User, request_model: models.PutFileChmodRequest) -> models.PutFileChmodResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call(
+            "PUT", "/filesystem/chmod",
+            json_body={"path": request_model.path, "mode": request_model.mode},
+        )
+        return models.PutFileChmodResponse(output=_file_model(result))
 
     async def chown(self, resource: status_models.Resource, user: User, request_model: models.PutFileChownRequest) -> models.PutFileChownResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call(
+            "PUT", "/filesystem/chown",
+            json_body={
+                "path": request_model.path,
+                "owner": request_model.owner,
+                "group": request_model.group,
+            },
+        )
+        return models.PutFileChownResponse(output=_file_model(result))
 
-    async def ls(self, resource: status_models.Resource, user: User, path: str, show_hidden: bool, numeric_uid: bool, recursive: bool, dereference: bool) -> models.GetDirectoryLsResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+    # --- Directory listing ------------------------------------------------
 
-    async def head(self, resource: status_models.Resource, user: User, path: str, file_bytes: int, lines: int, skip_trailing: bool) -> models.GetFileHeadResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+    async def ls(
+        self,
+        resource: status_models.Resource,
+        user: User,
+        path: str,
+        show_hidden: bool,
+        numeric_uid: bool,
+        recursive: bool,
+        dereference: bool,
+    ) -> models.GetDirectoryLsResponse:
+        # NOTE: fs-facade-service currently honours only `show_hidden`. The
+        # other flags (numeric_uid, recursive, dereference) are silently
+        # ignored. Track adding upstream support if/when needed.
+        result = await _fs_call(
+            "GET", "/filesystem/ls",
+            params={"path": path, "show_hidden": str(show_hidden).lower()},
+        )
+        if not isinstance(result, list):
+            raise HTTPException(status_code=502, detail=f"fs-facade ls returned {type(result).__name__}")
+        return models.GetDirectoryLsResponse(output=[models.File.model_validate(f) for f in result])
 
-    async def tail(self, resource: status_models.Resource, user: User, path: str, file_bytes: int | None, lines: int | None, skip_heading: bool) -> models.GetFileTailResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+    # --- File content reads -----------------------------------------------
 
-    async def view(self, resource: status_models.Resource, user: User, path: str, size: int, offset: int) -> models.GetViewFileResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+    async def head(
+        self,
+        resource: status_models.Resource,
+        user: User,
+        path: str,
+        file_bytes: int,
+        lines: int,
+        skip_trailing: bool,
+    ) -> models.GetFileHeadResponse:
+        params: dict = {"path": path}
+        content_type = models.ContentUnit.lines
+        if file_bytes is not None:
+            params["bytes"] = file_bytes
+            content_type = models.ContentUnit.bytes
+        if lines is not None:
+            params["lines"] = lines
+        text = await _fs_call("GET", "/filesystem/head", params=params)
+        return models.GetFileHeadResponse(output=_content_payload(text, content_type=content_type))
+
+    async def tail(
+        self,
+        resource: status_models.Resource,
+        user: User,
+        path: str,
+        file_bytes: int | None,
+        lines: int | None,
+        skip_heading: bool,
+    ) -> models.GetFileTailResponse:
+        params: dict = {"path": path}
+        content_type = models.ContentUnit.lines
+        if file_bytes is not None:
+            params["bytes"] = file_bytes
+            content_type = models.ContentUnit.bytes
+        if lines is not None:
+            params["lines"] = lines
+        text = await _fs_call("GET", "/filesystem/tail", params=params)
+        return models.GetFileTailResponse(output=_content_payload(text, content_type=content_type))
+
+    async def view(
+        self,
+        resource: status_models.Resource,
+        user: User,
+        path: str,
+        size: int,
+        offset: int,
+    ) -> models.GetViewFileResponse:
+        text = await _fs_call(
+            "GET", "/filesystem/view",
+            params={"path": path, "size": size, "offset": offset},
+        )
+        return models.GetViewFileResponse(
+            output=_content_payload(text, content_type=models.ContentUnit.bytes, offset=offset),
+        )
+
+    # --- Metadata ---------------------------------------------------------
 
     async def checksum(self, resource: status_models.Resource, user: User, path: str) -> models.GetFileChecksumResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call("GET", "/filesystem/checksum", params={"path": path})
+        return models.GetFileChecksumResponse(output=models.FileChecksum.model_validate(result))
 
     async def file(self, resource: status_models.Resource, user: User, path: str) -> models.GetFileTypeResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call("GET", "/filesystem/file", params={"path": path})
+        # `file` returns a bare string from the dispatcher.
+        if isinstance(result, dict):
+            result = result.get("output") or result.get("type") or ""
+        return models.GetFileTypeResponse(output=str(result) if result is not None else None)
 
     async def stat(self, resource: status_models.Resource, user: User, path: str, dereference: bool) -> models.GetFileStatResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call(
+            "GET", "/filesystem/stat",
+            params={"path": path, "dereference": str(dereference).lower()},
+        )
+        return models.GetFileStatResponse(output=models.FileStat.model_validate(result))
+
+    # --- File management --------------------------------------------------
 
     async def rm(self, resource: status_models.Resource, user: User, path: str) -> models.RemoveResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        await _fs_call("DELETE", "/filesystem/rm", params={"path": path})
+        return models.RemoveResponse(output=f"Removed {path}")
 
     async def mkdir(self, resource: status_models.Resource, user: User, request_model: models.PostMakeDirRequest) -> models.PostMkdirResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call(
+            "POST", "/filesystem/mkdir",
+            json_body={"path": request_model.path, "parent": request_model.parent},
+        )
+        return models.PostMkdirResponse(output=_file_model(result))
 
-    async def symlink(self, resource: status_models.Resource, user: User, request_model: models.PostFileSymlinkRequest) -> models.PostFileSymlinkResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+    async def symlink(
+        self,
+        resource: status_models.Resource,
+        user: User,
+        request_model: models.PostFileSymlinkRequest,
+    ) -> models.PostFileSymlinkResponse:
+        result = await _fs_call(
+            "POST", "/filesystem/symlink",
+            json_body={"path": request_model.path, "link_path": request_model.link_path},
+        )
+        return models.PostFileSymlinkResponse(output=_file_model(result))
+
+    # --- Transfer ---------------------------------------------------------
 
     async def download(self, resource: status_models.Resource, user: User, path: str) -> models.GetFileDownloadResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call("GET", "/filesystem/download", params={"path": path})
+        # fs-facade returns {"content": <base64>, "size": <int>}.
+        content = result.get("content") if isinstance(result, dict) else result
+        return models.GetFileDownloadResponse(output=content)
 
     async def upload(self, resource: status_models.Resource, user: User, path: str, content: str) -> models.PutFileUploadResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        try:
+            raw = base64.b64decode(content)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 upload content: {exc}") from exc
+        result = await _fs_call(
+            "POST", "/filesystem/upload",
+            params={"path": path},
+            files={"file": (path.rsplit("/", 1)[-1] or "upload", raw, "application/octet-stream")},
+        )
+        return models.PutFileUploadResponse(
+            output=result if isinstance(result, str) else "File uploaded successfully",
+        )
+
+    # --- Archive ----------------------------------------------------------
 
     async def compress(self, resource: status_models.Resource, user: User, request_model: models.PostCompressRequest) -> models.PostCompressResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        # NOTE: fs-facade does not currently honour `match_pattern`; it is
+        # silently dropped here.
+        body = {
+            "path": request_model.path,
+            "target_path": request_model.target_path,
+            "compression": request_model.compression.value if request_model.compression else "gzip",
+            "dereference": request_model.dereference,
+        }
+        result = await _fs_call("POST", "/filesystem/compress", json_body=body)
+        return models.PostCompressResponse(output=_file_model(result))
 
     async def extract(self, resource: status_models.Resource, user: User, request_model: models.PostExtractRequest) -> models.PostExtractResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        body = {
+            "path": request_model.path,
+            "target_path": request_model.target_path,
+            "compression": request_model.compression.value if request_model.compression else "gzip",
+        }
+        result = await _fs_call("POST", "/filesystem/extract", json_body=body)
+        return models.PostExtractResponse(output=_file_model(result))
 
     async def mv(self, resource: status_models.Resource, user: User, request_model: models.PostMoveRequest) -> models.PostMoveResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call(
+            "POST", "/filesystem/mv",
+            json_body={"path": request_model.path, "target_path": request_model.target_path},
+        )
+        return models.PostMoveResponse(output=_file_model(result))
 
     async def cp(self, resource: status_models.Resource, user: User, request_model: models.PostCopyRequest) -> models.PostCopyResponse:
-        raise HTTPException(status_code=501, detail="Not implemented")
+        result = await _fs_call(
+            "POST", "/filesystem/cp",
+            json_body={
+                "path": request_model.path,
+                "target_path": request_model.target_path,
+                "dereference": request_model.dereference,
+            },
+        )
+        return models.PostCopyResponse(output=_file_model(result))

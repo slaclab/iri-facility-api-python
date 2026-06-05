@@ -1,46 +1,35 @@
 """
 SLAC S3DF Status Adapter for the IRI Facility API.
 
-Serves the IRI ``/status`` router (resources, events, incidents) from
-IRI-owned periodic health checks and a local in-memory status cache.
+Serves the IRI ``/status`` router (resources, events, incidents) by
+forwarding queries to ``s3df-status-api`` and merging dynamic status
+with the static resource metadata kept in :mod:`app.s3df.status_registry`.
 
-Design (see design-docs/s3df-status-adapter.md):
-
-  * Resources are STATIC config (``app.s3df.status.config``). Each pairs an IRI
-    ``Resource`` template with one or more health checks. Built-in checks are
-    merged with optional ``S3DF_STATUS_CHECKS_FILE`` and
-    ``S3DF_STATUS_CHECKS_JSON`` checks at adapter startup; full coverage is
-    required by default.
-  * A background poller (``app.s3df.status.poller``) runs every
-    ``S3DF_STATUS_POLL_INTERVAL`` seconds, queries each resource's configured
-    sources, maps the aggregate result to a Status (up/down/degraded/unknown),
-    and records it in an in-memory store (``app.s3df.status.store``).
-  * The store detects status TRANSITIONS to emit Events and to open/close
-    unplanned Incidents.
-
-This module hosts only the ``FacilityAdapter`` implementation; the registry,
-health checker, store and poller live in the ``app.s3df.status`` package.
-
-Lifecycle note: IRI constructs adapters synchronously at import/router-build time
-— before the asyncio event loop exists — so the poller and its ``httpx`` client
-are created LAZILY on the first request (``_ensure_started``), where the loop is
-running. State is in-memory and per-process: it is lost on restart and diverges
-across multiple uvicorn workers. Persistence and FastAPI-lifespan shutdown wiring
-are tracked as follow-ups in the design doc.
+The upstream microservice owns the polling, store, and incident
+lifecycle — this adapter is a stateless translation layer between
+``ResourceStatus``/``StatusEvent``/``Incident`` records and the IRI
+``Resource``/``Event``/``Incident`` models.
 """
 
-import asyncio
 import datetime
 import logging
+import uuid
 
 from app.routers.status import facility_adapter as status_adapter
 from app.routers.status import models as status_models
-
-from .status.config import MonitoredResource, StatusSettings, build_registry
-from .status.poller import StatusPoller
-from .status.store import StatusStore
+from app.s3df.clients import S3DFStatusApiError, get_s3df_status_api_client
+from app.s3df.status_registry import (
+    S3DF_RESOURCES,
+    ResourceMeta,
+    parse_status,
+    site_id,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
 
 
 def _paginate(items: list, offset: int | None, limit: int | None) -> list:
@@ -51,49 +40,123 @@ def _paginate(items: list, offset: int | None, limit: int | None) -> list:
     return items
 
 
-class S3DFStatusAdapter(status_adapter.FacilityAdapter):
-    """IRI status FacilityAdapter backed by internal S3DF health checks.
+def _parse_dt(value) -> datetime.datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
 
-    Implements every method called by the IRI status router:
-      get_resources, get_resource, get_events, get_event,
-      get_incidents, get_incident.
 
-    The status router is unauthenticated, so these methods take no user.
-    """
-
-    def __init__(
-        self,
-        settings: StatusSettings | None = None,
-        monitored: list[MonitoredResource] | None = None,
-    ):
-        self._settings = settings or StatusSettings()
-        self._monitored = monitored if monitored is not None else build_registry(self._settings)
-        self._store = StatusStore(
-            site_id=self._settings.site_id,
-            resources=[m.resource for m in self._monitored],
+def _build_resource(meta: ResourceMeta, status_payload: dict | None) -> status_models.Resource:
+    """Merge static metadata with a ResourceStatus dict from s3df-status-api."""
+    last_modified = _utc_now()
+    current_status = status_models.Status.unknown
+    if status_payload is not None:
+        current_status = parse_status(status_payload.get("status")) or status_models.Status.unknown
+        last_modified = (
+            _parse_dt(status_payload.get("last_changed_at"))
+            or _parse_dt(status_payload.get("last_poll"))
+            or last_modified
         )
-        self._poller = StatusPoller(self._store, self._settings, self._monitored)
-        self._started = False
-        self._start_lock = asyncio.Lock()
+    return status_models.Resource(
+        id=meta.id,
+        name=meta.name,
+        description=meta.description,
+        site_id=site_id(),
+        group=meta.group,
+        resource_type=meta.resource_type,
+        capability_ids=list(meta.capability_ids),
+        current_status=current_status,
+        last_modified=last_modified,
+    )
 
-    async def _ensure_started(self) -> None:
-        """Lazily start the poller on first use (double-checked under a lock)."""
-        if self._started:
-            return
-        async with self._start_lock:
-            if self._started:
-                return
-            try:
-                await self._poller.start()
-                self._started = True
-            except Exception:  # noqa: BLE001 - retry on the next request
-                logger.exception("Failed to start S3DF status poller; will retry")
-                raise
 
-    async def aclose(self) -> None:
-        """Release background resources (HTTP client + poller task)."""
-        await self._poller.aclose()
-        self._started = False
+def _event_id(payload: dict) -> str:
+    eid = payload.get("id")
+    if eid is not None:
+        return str(eid)
+    # synthesize a stable id when the upstream omits one
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"s3df-event:{payload.get('resource_id')}:{payload.get('occurred_at')}",
+    ).hex
+
+
+def _build_event(payload: dict) -> status_models.Event | None:
+    occurred_at = _parse_dt(payload.get("occurred_at"))
+    if occurred_at is None:
+        return None
+    to_status = parse_status(payload.get("to_status")) or status_models.Status.unknown
+    from_status = payload.get("from_status") or "unknown"
+    detail = payload.get("detail")
+    resource_id = payload.get("resource_id") or ""
+    eid = _event_id(payload)
+    return status_models.Event(
+        id=eid,
+        name=f"{resource_id}: {from_status} -> {to_status.value}",
+        description=detail,
+        last_modified=occurred_at,
+        occurred_at=occurred_at,
+        status=to_status,
+        resource_id=resource_id,
+        incident_id=None,
+    )
+
+
+def _build_incident(payload: dict) -> status_models.Incident | None:
+    opened_at = _parse_dt(payload.get("opened_at"))
+    if opened_at is None:
+        return None
+    resolved_at = _parse_dt(payload.get("resolved_at"))
+    summary = payload.get("summary")
+    resource_id = payload.get("resource_id") or ""
+    incident_id = str(payload.get("id") or "")
+    if not incident_id:
+        return None
+    is_resolved = resolved_at is not None
+    incident_status = status_models.Status.up if is_resolved else status_models.Status.down
+    resolution = (
+        status_models.Resolution.completed if is_resolved else status_models.Resolution.unresolved
+    )
+    return status_models.Incident(
+        id=incident_id,
+        name=f"{resource_id} incident",
+        description=summary,
+        last_modified=resolved_at or opened_at,
+        status=incident_status,
+        resource_ids=[resource_id] if resource_id else [],
+        event_ids=[],
+        start=opened_at,
+        end=resolved_at,
+        type=status_models.IncidentType.unplanned,
+        resolution=resolution,
+    )
+
+
+class S3DFStatusAdapter(status_adapter.FacilityAdapter):
+    """IRI status FacilityAdapter backed by the s3df-status-api microservice."""
+
+    def __init__(self):
+        self._client = get_s3df_status_api_client()
+
+    # -- helpers -----------------------------------------------------------
+
+    async def _all_resources(self) -> list[status_models.Resource]:
+        try:
+            statuses = await self._client.list_resource_statuses()
+        except S3DFStatusApiError:
+            logger.exception("s3df-status-api list_resource_statuses failed; returning unknown statuses")
+            statuses = []
+        by_id = {s.get("resource_id"): s for s in statuses if s.get("resource_id")}
+        return [_build_resource(meta, by_id.get(meta.id)) for meta in S3DF_RESOURCES.values()]
 
     # -- resources ---------------------------------------------------------
 
@@ -110,9 +173,9 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         capability=None,
         site_id: str | None = None,
     ) -> list[status_models.Resource]:
-        await self._ensure_started()
+        resources = await self._all_resources()
         items = status_models.Resource.find(
-            self._store.resources(),
+            resources,
             name=name,
             description=description,
             modified_since=modified_since,
@@ -124,11 +187,41 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         )
         return _paginate(items, offset, limit)
 
-    async def get_resource(self, id_: str) -> status_models.Resource:
-        await self._ensure_started()
-        return status_models.Resource.find_by_id(self._store.resources(), id_, allow_name=True)
+    async def get_resource(self, id_: str) -> status_models.Resource | None:
+        meta = S3DF_RESOURCES.get(id_)
+        if meta is None:
+            # allow lookup-by-name as get_resources does (router supports it)
+            for candidate in S3DF_RESOURCES.values():
+                if candidate.name == id_:
+                    meta = candidate
+                    break
+        if meta is None:
+            return None
+        try:
+            payload = await self._client.get_resource_status(meta.id)
+        except S3DFStatusApiError:
+            logger.exception(f"s3df-status-api get_resource_status({meta.id}) failed")
+            payload = None
+        return _build_resource(meta, payload)
 
     # -- events ------------------------------------------------------------
+
+    async def _all_events(
+        self,
+        resource_id: str | None = None,
+        since: datetime.datetime | None = None,
+    ) -> list[status_models.Event]:
+        try:
+            payloads = await self._client.list_events(resource_id=resource_id, since=since)
+        except S3DFStatusApiError:
+            logger.exception("s3df-status-api list_events failed; returning empty list")
+            return []
+        events: list[status_models.Event] = []
+        for p in payloads:
+            ev = _build_event(p)
+            if ev is not None:
+                events.append(ev)
+        return events
 
     async def get_events(
         self,
@@ -144,9 +237,9 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         time_: datetime.datetime | None = None,
         modified_since: datetime.datetime | None = None,
     ) -> list[status_models.Event]:
-        await self._ensure_started()
+        events = await self._all_events(resource_id=resource_id, since=from_)
         items = status_models.Event.find(
-            self._store.events(),
+            events,
             incident_id=incident_id,
             resource_id=resource_id,
             name=name,
@@ -159,11 +252,28 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         )
         return _paginate(items, offset, limit)
 
-    async def get_event(self, id_: str) -> status_models.Event:
-        await self._ensure_started()
-        return status_models.Event.find_by_id(self._store.events(), id_)
+    async def get_event(self, id_: str) -> status_models.Event | None:
+        events = await self._all_events()
+        return status_models.Event.find_by_id(events, id_)
 
     # -- incidents ---------------------------------------------------------
+
+    async def _all_incidents(
+        self,
+        resource_id: str | None = None,
+        state: str | None = None,
+    ) -> list[status_models.Incident]:
+        try:
+            payloads = await self._client.list_incidents(resource_id=resource_id, state=state)
+        except S3DFStatusApiError:
+            logger.exception("s3df-status-api list_incidents failed; returning empty list")
+            return []
+        incidents: list[status_models.Incident] = []
+        for p in payloads:
+            inc = _build_incident(p)
+            if inc is not None:
+                incidents.append(inc)
+        return incidents
 
     async def get_incidents(
         self,
@@ -180,9 +290,9 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         resource_id: str | None = None,
         resolution: status_models.Resolution | None = None,
     ) -> list[status_models.Incident]:
-        await self._ensure_started()
+        incidents = await self._all_incidents(resource_id=resource_id)
         items = status_models.Incident.find(
-            self._store.incidents(),
+            incidents,
             name=name,
             description=description,
             status=status,
@@ -196,6 +306,6 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         )
         return _paginate(items, offset, limit)
 
-    async def get_incident(self, id_: str) -> status_models.Incident:
-        await self._ensure_started()
-        return status_models.Incident.find_by_id(self._store.incidents(), id_)
+    async def get_incident(self, id_: str) -> status_models.Incident | None:
+        incidents = await self._all_incidents()
+        return status_models.Incident.find_by_id(incidents, id_)
