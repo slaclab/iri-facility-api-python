@@ -36,10 +36,34 @@ async def get_resources(
     resource_type: models.ResourceType = Query(default=None),
     current_status: models.Status = Query(default=None),
     capability: List[AllocationUnit] = Query(default=None, min_length=1),
-    _forbid=Depends(forbidExtraQueryParams("name", "description", "group", "offset", "limit", "modified_since", "resource_type", "current_status", "capability", multiParams={"capability"})),
+    site_id: str | None = Query(default=None, min_length=1),
+    _forbid=Depends(
+        forbidExtraQueryParams(
+            "name",
+            "description",
+            "group",
+            "offset",
+            "limit",
+            "modified_since",
+            "resource_type",
+            "current_status",
+            "capability",
+            "site_id",
+            multiParams={"capability"},
+        )
+    ),
 ) -> list[models.Resource]:
     return await router.adapter.get_resources(
-        offset=offset, limit=limit, name=name, description=description, group=group, modified_since=modified_since, resource_type=resource_type, current_status=current_status, capability=capability
+        offset=offset,
+        limit=limit,
+        name=name,
+        description=description,
+        group=group,
+        modified_since=modified_since,
+        resource_type=resource_type,
+        current_status=current_status,
+        capability=capability,
+        site_id=site_id,
     )
 
 
