@@ -123,6 +123,7 @@ class FsFacadeClient:
         json_body: Any | None = None,
         files: dict | None = None,
         data: dict | None = None,
+        headers: dict | None = None,
         timeout: float | None = None,
     ) -> Any:
         """Submit an operation, wait for terminal state, and return the parsed result.
@@ -140,6 +141,8 @@ class FsFacadeClient:
             kwargs["files"] = files
         if data is not None:
             kwargs["data"] = data
+        if headers is not None:
+            kwargs["headers"] = headers
 
         task_id = await self._request_task_id(method, path, **kwargs)
         task = await self.wait(task_id, timeout=timeout)

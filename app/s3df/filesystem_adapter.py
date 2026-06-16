@@ -24,10 +24,10 @@ from app.s3df.clients import (
     FsFacadeError,
     FsFacadeTimeout,
     get_fs_facade_client,
-    get_user_lookup_client,
 )
 from app.routers.filesystem import facility_adapter, models
 from app.routers.status import models as status_models
+from app.request_context import get_auth_headers
 
 LOG = logging.getLogger(__name__)
 
@@ -35,8 +35,11 @@ LOG = logging.getLogger(__name__)
 async def _fs_call(method: str, path: str, **kwargs):
     """Submit an op via fs-facade and translate transport/timeout errors to HTTP."""
     client = get_fs_facade_client()
+    auth_headers = get_auth_headers()
+    if auth_headers:
+        LOG.debug("Forwarding auth headers to fs-facade: %s", list(auth_headers.keys()))
     try:
-        return await client.call(method, path, **kwargs)
+        return await client.call(method, path, headers=auth_headers or None, **kwargs)
     except FsFacadeTimeout as exc:
         LOG.warning(f"fs-facade timeout on {method} {path}: {exc}")
         raise HTTPException(status_code=504, detail=f"fs-facade timeout: {exc}") from exc
@@ -66,21 +69,15 @@ def _content_payload(text: str, *, content_type: models.ContentUnit, offset: int
 class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityAdapter):
     """Filesystem adapter that forwards operations to fs-facade-service."""
 
-    async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None) -> User:
-        try:
-            lookup_data = await get_user_lookup_client().get_user(user_id)
-        except ValueError:
-            raise HTTPException(status_code=403, detail=f"User '{user_id}' not found in directory")
-        except Exception as e:
-            LOG.error(f"user-lookup service error: {e}")
-            raise HTTPException(status_code=502, detail="User lookup service unavailable")
+    async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None):
+        
+        class _User:
+            def __init__(self, uid: str):
+                self.id = uid               
+                self.unix_username = uid     
+                self.api_key = api_key
 
-        return User(
-            id=user_id,
-            name=lookup_data.get("username", user_id),
-            api_key=api_key,
-            client_ip=client_ip,
-        )
+        return _User(user_id)
 
     # --- Permissions / ownership ------------------------------------------
 
