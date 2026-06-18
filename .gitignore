@@ -16,3 +16,4 @@ test_compute.sh
 fastapi.log
 compute-tests/
 local.env
+test_filesystem.sh

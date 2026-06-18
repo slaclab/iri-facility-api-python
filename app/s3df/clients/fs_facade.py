@@ -27,6 +27,9 @@ LOG = logging.getLogger(__name__)
 
 class FsFacadeError(Exception):
     """Raised when fs-facade returns an error or a task fails."""
+    def __init__(self, message: str, status_code: int = 502):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class FsFacadeTimeout(Exception):
@@ -70,7 +73,8 @@ class FsFacadeClient:
             raise FsFacadeError(f"fs-facade transport error: {exc}") from exc
         if resp.status_code >= 400:
             raise FsFacadeError(
-                f"fs-facade {method} {path} -> {resp.status_code}: {resp.text}"
+                f"fs-facade {method} {path} -> {resp.status_code}: {resp.text}",
+                status_code=resp.status_code,
             )
         data = resp.json()
         # The controllers return either a bare string (response_model=str) or
@@ -160,6 +164,28 @@ class FsFacadeClient:
             except (TypeError, ValueError):
                 return result
         return result
+
+    async def submit(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json_body: Any | None = None,
+        files: dict | None = None,
+        headers: dict | None = None,
+    ) -> str:
+        """Submit an operation to fs-facade and return the task_id immediately, without polling."""
+        kwargs: dict[str, Any] = {}
+        if params is not None:
+            kwargs["params"] = params
+        if json_body is not None:
+            kwargs["json"] = json_body
+        if files is not None:
+            kwargs["files"] = files
+        if headers is not None:
+            kwargs["headers"] = headers
+        return await self._request_task_id(method, path, **kwargs)
 
 
 _default_client: Optional[FsFacadeClient] = None

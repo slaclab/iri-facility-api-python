@@ -5,9 +5,7 @@ Forwards every IRI filesystem operation to the ``fs-facade-service``
 microservice, polls the task endpoint until it reaches a terminal state,
 and converts the result into the matching IRI response model.
 
-Authentication: Dex JWT verification (mixin); POSIX identity is fetched
-from user-lookup and attached to the IRI ``User`` object. The user
-identity is not yet forwarded to fs-facade — see TODO below.
+Authentication: Dex JWT verification via S3DFAuthenticatedAdapter mixin.
 
 See ``fs-facade-service/app/controllers/filesystem_controller.py`` for
 the upstream wire format.
@@ -70,14 +68,13 @@ class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityA
     """Filesystem adapter that forwards operations to fs-facade-service."""
 
     async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None):
-        
         class _User:
-            def __init__(self, uid: str):
-                self.id = uid               
-                self.unix_username = uid     
-                self.api_key = api_key
+            def __init__(self, uid: str, key: str):
+                self.id = uid
+                self.unix_username = uid
+                self.api_key = key
 
-        return _User(user_id)
+        return _User(user_id, api_key)
 
     # --- Permissions / ownership ------------------------------------------
 

@@ -57,10 +57,6 @@ class _ExternalRequestContextMiddleware(BaseHTTPMiddleware):
         try:
             set_api_url_base(request)
             set_auth_headers(request)
-            logging.getLogger(__name__).info(
-                "Incoming request headers: %s",
-                dict(request.headers),
-            )
             return await call_next(request)
         finally:
             _api_url_base.reset(token)
