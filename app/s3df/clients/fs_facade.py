@@ -169,7 +169,7 @@ class FsFacadeClient:
         self,
         method: str,
         path: str,
-        *,
+        *, #TODO: Get rid of the *
         params: dict | None = None,
         json_body: Any | None = None,
         files: dict | None = None,

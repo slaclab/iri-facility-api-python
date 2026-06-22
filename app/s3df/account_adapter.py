@@ -61,7 +61,7 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
     # AccountFacilityAdapter methods
     # -------------------------------------------------------------------------
     
-    async def get_capabilities(self) -> list[Capability]:
+    async def get_capabilities(self, name: str | None = None, modified_since: str | None = None, offset: int = 0, limit: int = 1000) -> list[Capability]:
         """
         coact.Cluster → IRI.Capability (compute)
         Static storage types → IRI.Capability (storage)

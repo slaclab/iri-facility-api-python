@@ -100,7 +100,10 @@ async def _submit_to_fs_facade(task: task_models.TaskCommand) -> str:
     if cmd == "cp":
         return await client.submit("POST", "/filesystem/cp",
             json_body=_model_dict(args["request_model"]), headers=auth)
-
+    if cmd == "upload":
+        return await client.submit("POST", "/filesystem/upload",
+            json_body={"path": args["path"], "content": args["content"]}, headers=auth)
+    
     # PUT endpoints — JSON body
     if cmd == "chmod":
         return await client.submit("PUT", "/filesystem/chmod",
