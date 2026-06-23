@@ -11,7 +11,6 @@ See ``fs-facade-service/app/controllers/filesystem_controller.py`` for
 the upstream wire format.
 """
 
-import base64
 import logging
 
 from fastapi import HTTPException
@@ -224,23 +223,18 @@ class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityA
 
     async def download(self, resource: status_models.Resource, user: User, path: str) -> models.GetFileDownloadResponse:
         result = await _fs_call("GET", "/filesystem/download", params={"path": path})
-        # fs-facade returns {"content": <base64>, "size": <int>}.
-        content = result.get("content") if isinstance(result, dict) else result
-        return models.GetFileDownloadResponse(output=content)
+        # fs-facade returns the IRI-aligned shape: {"output": <base64>}.
+        return models.GetFileDownloadResponse(**result) if isinstance(result, dict) else models.GetFileDownloadResponse(output=result)
 
     async def upload(self, resource: status_models.Resource, user: User, path: str, content: str) -> models.PutFileUploadResponse:
-        try:
-            raw = base64.b64decode(content)
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid base64 upload content: {exc}") from exc
         result = await _fs_call(
             "POST", "/filesystem/upload",
-            params={"path": path},
-            files={"file": (path.rsplit("/", 1)[-1] or "upload", raw, "application/octet-stream")},
+            json_body={"path": path, "content": content},
         )
-        return models.PutFileUploadResponse(
-            output=result if isinstance(result, str) else "File uploaded successfully",
-        )
+        # fs-facade returns the IRI-aligned shape: {"output": "<status message>"}.
+        if isinstance(result, dict):
+            return models.PutFileUploadResponse(**result)
+        return models.PutFileUploadResponse(output=result if isinstance(result, str) else "File uploaded successfully")
 
     # --- Archive ----------------------------------------------------------
 

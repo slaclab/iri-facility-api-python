@@ -163,6 +163,9 @@ class S3DFTaskAdapter(S3DFAuthenticatedAdapter, task_adapter.FacilityAdapter):
             return None
 
         raw_result = fs_task.get("result")
+        # fs-facade workers emit JSON strings shaped like the IRI response models
+        # (e.g. {"output": ...}). Parse to a dict so Task.result deserialises
+        # cleanly on the IRI side; fall back to {"output": <str>} for plain strings.
         if isinstance(raw_result, str):
             try:
                 raw_result = json.loads(raw_result)

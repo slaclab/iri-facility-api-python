@@ -49,7 +49,7 @@ dev-s3df: deps
 # --- Docker / GHCR targets ---
 GHCR_USERNAME ?= slaclab
 GHCR_IMAGE ?= ghcr.io/$(GHCR_USERNAME)/iri-s3df
-IMAGE_TAG  ?= prod
+IMAGE_TAG  ?= dev-debug
 
 docker-build:
 	docker build --platform linux/amd64 -t $(GHCR_IMAGE):$(IMAGE_TAG) .

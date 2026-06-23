@@ -44,6 +44,7 @@ from pydantic import ConfigDict, ValidationError
 from ..routers.compute import models as compute_models
 from ..types.user import User
 from ..routers.status import models as status_models
+import shlex
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +252,8 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         api = _build_slurm_api(token)
         headers = _auth_headers(unix_user, token)
         return api, headers
+    
+
 
     # -- submit_job ---------------------------------------------------------
 
