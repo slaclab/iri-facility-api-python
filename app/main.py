@@ -21,7 +21,7 @@ from app.routers.filesystem import filesystem
 from app.routers.task import task
 
 from . import config
-from .request_context import set_api_url_base, _api_url_base
+from .request_context import set_api_url_base, set_auth_headers, _api_url_base
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,7 +48,7 @@ if config.OPENTELEMETRY_ENABLED:
     tracer = trace.get_tracer(__name__)
 # ------------------------------------------------------------------
 
-APP = FastAPI(servers=[{"url": config.API_URL_ROOT}], **config.API_CONFIG)
+app = FastAPI(servers=[{"url": config.API_URL_ROOT}], **config.API_CONFIG)
 
 
 class _ExternalRequestContextMiddleware(BaseHTTPMiddleware):
@@ -56,26 +56,27 @@ class _ExternalRequestContextMiddleware(BaseHTTPMiddleware):
         token = _api_url_base.set(None)
         try:
             set_api_url_base(request)
+            set_auth_headers(request)
             return await call_next(request)
         finally:
             _api_url_base.reset(token)
 
 
-APP.add_middleware(_ExternalRequestContextMiddleware)
+app.add_middleware(_ExternalRequestContextMiddleware)
 
 if config.OPENTELEMETRY_ENABLED:
-    FastAPIInstrumentor.instrument_app(APP)
+    FastAPIInstrumentor.instrument_app(app)
 
-install_error_handlers(APP)
+install_error_handlers(app)
 
 api_prefix = f"{config.API_PREFIX}{config.API_URL}"
 
 # Attach routers under the prefix
-APP.include_router(facility.router, prefix=api_prefix)
-APP.include_router(status.router, prefix=api_prefix)
-APP.include_router(account.router, prefix=api_prefix)
-APP.include_router(compute.router, prefix=api_prefix)
-APP.include_router(filesystem.router, prefix=api_prefix)
-APP.include_router(task.router, prefix=api_prefix)
+app.include_router(facility.router, prefix=api_prefix)
+app.include_router(status.router, prefix=api_prefix)
+app.include_router(account.router, prefix=api_prefix)
+app.include_router(compute.router, prefix=api_prefix)
+app.include_router(filesystem.router, prefix=api_prefix)
+app.include_router(task.router, prefix=api_prefix)
 
 logging.getLogger().info(f"API path: {api_prefix}")

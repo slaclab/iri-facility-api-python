@@ -47,9 +47,9 @@ dev-s3df: deps
 	API_URL_ROOT='http://127.0.0.1:8000' fastapi dev
 
 # --- Docker / GHCR targets ---
-GHCR_USERNAME ?= ""
+GHCR_USERNAME ?= slaclab
 GHCR_IMAGE ?= ghcr.io/$(GHCR_USERNAME)/iri-s3df
-IMAGE_TAG  ?= dev
+IMAGE_TAG  ?= prod
 
 docker-build:
 	docker build --platform linux/amd64 -t $(GHCR_IMAGE):$(IMAGE_TAG) .

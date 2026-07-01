@@ -44,6 +44,7 @@ from pydantic import ConfigDict, ValidationError
 from ..routers.compute import models as compute_models
 from ..types.user import User
 from ..routers.status import models as status_models
+import shlex
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,41 @@ def _job_from_slurm_info(job_info, include_spec: bool = False) -> dict:
         }
     return job_dict
 
+def _build_batch_script(job_spec: compute_models.JobSpec) -> str:
+    """
+    Build a Slurm batch-script body from an IRI JobSpec.
+
+    slurmrestd's `script` field requires an inline shell program, not a bare
+    path. IRI's `executable` is a path/command, so we wrap it here. This lets
+    callers pass `executable="/path/to/run.sh"` (plus `arguments`) without
+    embedding a shebang or the script's contents.
+    """
+    executable = job_spec.executable
+    if not executable:
+        raise HTTPException(
+            status_code=422,
+            detail="job_spec.executable is required for Slurm submission",
+        )
+
+    # Back-compat: caller already supplied a full script (starts with shebang).
+    if executable.startswith("#!"):
+        return executable
+
+    lines = ["#!/bin/bash"]
+    if job_spec.pre_launch:
+        lines.append(job_spec.pre_launch)
+
+    cmd = []
+    if job_spec.launcher:
+        cmd.append(job_spec.launcher)
+    cmd.append(shlex.quote(executable))
+    cmd.extend(shlex.quote(str(a)) for a in job_spec.arguments)
+    lines.append(" ".join(cmd))
+
+    if job_spec.post_launch:
+        lines.append(job_spec.post_launch)
+
+    return "\n".join(lines) + "\n"
 
 # ---------------------------------------------------------------------------
 # The adapter
@@ -251,7 +287,8 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         api = _build_slurm_api(token)
         headers = _auth_headers(unix_user, token)
         return api, headers
-
+    
+    
     # -- submit_job ---------------------------------------------------------
 
     async def submit_job(
@@ -331,7 +368,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 memory_per_node=memory_per_node,
                 time_limit=SlurmV0041PostJobSubmitRequestJobsInnerTimeLimit(set=True, number=duration_mins),
                 name=name,
-                script=executable,
+                script=_build_batch_script(job_spec),
                 argv=argv,
                 partition=partition,
                 account=account,

@@ -61,7 +61,7 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
     # AccountFacilityAdapter methods
     # -------------------------------------------------------------------------
     
-    async def get_capabilities(self) -> list[Capability]:
+    async def get_capabilities(self, name: str | None = None, modified_since: str | None = None, offset: int = 0, limit: int = 1000) -> list[Capability]:
         """
         coact.Cluster → IRI.Capability (compute)
         Static storage types → IRI.Capability (storage)
@@ -114,11 +114,10 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
 
         for repo in repos:
             all_users = set(repo.get("users", []) + repo.get("leaders", []) + [repo.get("principal", "")])
-            # if user.id in all_users:
-
+            
             projects.append(account_models.Project(
                 id=repo["Id"],
-                name=repo["name"],
+                name=f"{repo['facility']}:{repo['name']}",
                 description=repo.get("description", ""),
                 user_ids=list(all_users)
             ))
@@ -146,9 +145,11 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
         allocations = []
         
         # Map compute allocations
+        if len(repo_allocations) == 0:
+            raise HTTPException(status_code=404, detail=f"No compute allocations found for project {project.id}")
         for comp_alloc in repo_allocations:
             # comp_alloc_usage = [usage for usage in COACT_REPO_OVERALL_COMPUTE_USAGE if usage["allocation_id"] == comp_alloc["_id"]][0]
-            overall_usage = comp_alloc['usage'][0]
+            overall_usage = comp_alloc['usage'][0] if comp_alloc.get('usage') else None
             allocations.append(account_models.ProjectAllocation(
                 id=comp_alloc["_id"],
                 project_id=project.id,

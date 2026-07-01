@@ -26,7 +26,6 @@ class CoactClient:
         api_url: Optional[str] = None,
         service_user: Optional[str] = None,
         service_password: Optional[str] = None,
-        use_basic_auth: bool = False
     ):
         """
         Initialize the coact GraphQL client.
@@ -34,48 +33,49 @@ class CoactClient:
         Args:
             api_url: GraphQL endpoint URL (defaults to settings.coact_api_url)
             service_user: Service account username (defaults to settings.coact_service_user)
-            service_password: Service account password (for basic auth)
-            use_basic_auth: If True, use Basic auth instead of coactimp headers
+            service_password: Service account password for Basic auth through nginx
         """
         self.api_url = api_url or settings.coact_api_url
         self.service_user = service_user or settings.coact_service_user
         self.service_password = service_password
-        self.use_basic_auth = use_basic_auth
-        self._client: Optional[Client] = None
 
-        LOG.info(f"Initialized CoactClient for endpoint: {self.api_url} (service_user={self.service_user}, use_basic_auth={self.use_basic_auth})")
+        LOG.info(f"Initialized CoactClient for endpoint: {self.api_url} (service_user={self.service_user})")
 
     def _get_client(self, username: Optional[str] = None) -> Client:
         """
-        Get or create a GQL client with appropriate headers.
+        Create a GQL client with appropriate headers for each request.
+
+        Always authenticates the service account via Basic auth (for nginx).
+        When ``username`` is provided, also sets the ``coactimp`` header so
+        coact-api executes the query in the context of that user.
 
         Args:
-            username: Username for impersonation (coactimp mode) or ignored (basic auth mode)
+            username: End-user username to impersonate via coactimp. Pass None
+                      for service-account-level (admin) queries.
 
         Returns:
             Configured GQL Client instance
         """
-        headers = {"Content-Type": "application/json"}
+        if not self.service_password:
+            raise ValueError("service_password is required")
 
-        if self.use_basic_auth:
-            # Basic Authentication for /graphql-service endpoint
-            if not self.service_password:
-                raise ValueError("service_password required when use_basic_auth=True")
-            
-            credentials = base64.b64encode(f"{self.service_user}:{self.service_password}".encode()).decode("ascii")
-            print(f"Calling uri: {self.api_url} as {self.service_user} with basic auth") 
-            headers["Authorization"] = f"Basic {credentials}"
-            
-            LOG.debug(f"Using Basic auth as {self.service_user}")
-        else:
-            # UI-style headers for /graphql endpoint
-            headers["coactimp"] = username or "null"
+        credentials = base64.b64encode(
+            f"{self.service_user}:{self.service_password}".encode()
+        ).decode("ascii")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {credentials}",
+        }
+
+        if username:
+            headers["coactimp"] = username
             headers["coactshowall"] = "true"
-            
-            if username:
-                LOG.debug(f"Setting coactimp header for user: {username}")
+            LOG.debug(f"Impersonating user via coactimp: {username}")
+        else:
+            LOG.debug(f"Running as service account: {self.service_user}")
 
-        transport = HTTPXAsyncTransport(  # changed from HTTPXTransport
+        transport = HTTPXAsyncTransport(
             url=self.api_url,
             headers=headers,
             timeout=30.0
@@ -222,9 +222,7 @@ class CoactClient:
             result = await self.execute_query(
                 query,
                 variables={"filter": {"username": username}},
-                username=self.service_user
             )
-            print(result)
             users = result.get("usersLookupFromService", [])
             return users[0] if users else None
         except Exception as e:
@@ -258,7 +256,6 @@ class CoactClient:
             result = await self.execute_query(
                 query,
                 variables={"filter": {"repoid": repo_id}},
-                username=self.service_user
             )
             return result.get("access_groups", [])
         except Exception as e:
@@ -510,7 +507,6 @@ class CoactClient:
             result = await self.execute_query(
                 query,
                 variables={"repoId": repo_id},
-                username=self.service_user  # Use service user for this query
             )
             repo_allocations = result.get("repos", [])
             if not repo_allocations:
@@ -645,7 +641,6 @@ class CoactClient:
             result = await self.execute_query(
                 query,
                 variables={"repoId": repo_id, "allocationId": allocation_id},
-                username=self.service_user
             )
             repo = result.get("repos")
             if not repo:
@@ -799,29 +794,26 @@ class CoactClient:
         """
 
         try:
-            result = await self.execute_query(
-                query,
-                username=self.service_user
-            )
+            result = await self.execute_query(query)
             return result.get("repos", [])
-        except Exception as e:  
-            LOG.error(f"Failed to get repos for user {self.service_user}: {e}")
+        except Exception as e:
+            LOG.error(f"Failed to get all repos: {e}")
             return []
 
     async def get_user_repos(self, username: str) -> List[Dict[str, Any]]:
         """
-        Get repos for a user.
+        Get repos for a user by impersonating them via coactimp.
+
+        Delegates to get_my_repos so coact-api performs server-side filtering,
+        returning only the repos the user belongs to.
 
         Args:
             username: Username to query repos for
-        
+
         Returns:
             List of repo objects
         """
-        repos = await self.get_all_repos()
-        user_repos = [repo for repo in repos if username in repo.get("users", []) or username in repo.get("leaders", []) or username == repo.get("principal")]
-
-        return user_repos
+        return await self.get_my_repos(username)
 
     async def get_all_repos_and_facility(self) -> List[Dict[str, Any]]:
         """
@@ -838,11 +830,11 @@ class CoactClient:
                 }
             }
         """
-        try:            
-            result = await self.execute_query(query, username=self.service_user)
+        try:
+            result = await self.execute_query(query)
             return result.get("allreposandfacility", [])
         except Exception as e:
-            LOG.error(f"Failed to get all repos: {e}")
+            LOG.error(f"Failed to get all repos and facility: {e}")
             return []
 
 
@@ -853,7 +845,7 @@ _default_client: Optional[CoactClient] = None
 def get_coact_client() -> CoactClient:
     """
     Get or create the default CoactClient instance.
-    Reads basic auth settings from S3DFSettings.
+    Reads connection settings from S3DFSettings.
 
     Returns:
         Singleton CoactClient instance
@@ -865,7 +857,6 @@ def get_coact_client() -> CoactClient:
             api_url=settings.coact_api_url,
             service_user=settings.coact_service_user,
             service_password=settings.coact_service_password,
-            use_basic_auth=True,
         )
     
     return _default_client

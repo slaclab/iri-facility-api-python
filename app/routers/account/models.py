@@ -1,7 +1,7 @@
 """Models for account-related API endpoints, including users, projects, and allocations."""
 import datetime
 from pydantic import Field, computed_field, field_validator
-
+from typing import Optional
 from ...request_context import get_url_prefix
 from ...types.base import IRIBaseModel
 from ...types.scalars import AllocationUnit
@@ -20,7 +20,7 @@ class Project(IRIBaseModel):
     def _norm_dt_field(cls, v):
         return cls.normalize_dt(v)
 
-    last_modified: datetime.datetime = Field(..., description="Timestamp of the last modification of the project.", example="2026-02-21T14:30:00Z")
+    last_modified: Optional[datetime.datetime] = Field(None, description="Timestamp of the last modification of the project.", example="2026-02-21T14:30:00Z")
 
     @computed_field(description="URI to this project resource")
     @property

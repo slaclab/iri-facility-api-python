@@ -13,10 +13,10 @@ class S3DFSettings:
     """Configuration for S3DF coact-api integration."""
     
     def __init__(self):
-        self.coact_api_url = os.getenv("COACT_API_URL", "https://coact-dev.slac.stanford.edu/graphql-service-dev")
+        self.coact_api_url = os.getenv("COACT_API_URL", "https://coact.slac.stanford.edu/graphql-service")
         self.coact_service_user = os.getenv("COACT_SERVICE_USER")
         self.coact_service_password = os.getenv("COACT_SERVICE_PASSWORD")
-        self.coact_use_basic_auth = True
+        self.coact_use_basic_auth = False
 
         # Facility identification
         self.facility_name = os.getenv("S3DF_FACILITY_NAME", "s3df")

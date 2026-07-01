@@ -5,15 +5,12 @@ Forwards every IRI filesystem operation to the ``fs-facade-service``
 microservice, polls the task endpoint until it reaches a terminal state,
 and converts the result into the matching IRI response model.
 
-Authentication: Dex JWT verification (mixin); POSIX identity is fetched
-from user-lookup and attached to the IRI ``User`` object. The user
-identity is not yet forwarded to fs-facade — see TODO below.
+Authentication: Dex JWT verification via S3DFAuthenticatedAdapter mixin.
 
 See ``fs-facade-service/app/controllers/filesystem_controller.py`` for
 the upstream wire format.
 """
 
-import base64
 import logging
 
 from fastapi import HTTPException
@@ -24,10 +21,10 @@ from app.s3df.clients import (
     FsFacadeError,
     FsFacadeTimeout,
     get_fs_facade_client,
-    get_user_lookup_client,
 )
 from app.routers.filesystem import facility_adapter, models
 from app.routers.status import models as status_models
+from app.request_context import get_auth_headers
 
 LOG = logging.getLogger(__name__)
 
@@ -35,8 +32,11 @@ LOG = logging.getLogger(__name__)
 async def _fs_call(method: str, path: str, **kwargs):
     """Submit an op via fs-facade and translate transport/timeout errors to HTTP."""
     client = get_fs_facade_client()
+    auth_headers = get_auth_headers()
+    if auth_headers:
+        LOG.debug("Forwarding auth headers to fs-facade: %s", list(auth_headers.keys()))
     try:
-        return await client.call(method, path, **kwargs)
+        return await client.call(method, path, headers=auth_headers or None, **kwargs)
     except FsFacadeTimeout as exc:
         LOG.warning(f"fs-facade timeout on {method} {path}: {exc}")
         raise HTTPException(status_code=504, detail=f"fs-facade timeout: {exc}") from exc
@@ -66,21 +66,14 @@ def _content_payload(text: str, *, content_type: models.ContentUnit, offset: int
 class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityAdapter):
     """Filesystem adapter that forwards operations to fs-facade-service."""
 
-    async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None) -> User:
-        try:
-            lookup_data = await get_user_lookup_client().get_user(user_id)
-        except ValueError:
-            raise HTTPException(status_code=403, detail=f"User '{user_id}' not found in directory")
-        except Exception as e:
-            LOG.error(f"user-lookup service error: {e}")
-            raise HTTPException(status_code=502, detail="User lookup service unavailable")
+    async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None):
+        class _User:
+            def __init__(self, uid: str, key: str):
+                self.id = uid
+                self.unix_username = uid
+                self.api_key = key
 
-        return User(
-            id=user_id,
-            name=lookup_data.get("username", user_id),
-            api_key=api_key,
-            client_ip=client_ip,
-        )
+        return _User(user_id, api_key)
 
     # --- Permissions / ownership ------------------------------------------
 
@@ -230,23 +223,18 @@ class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityA
 
     async def download(self, resource: status_models.Resource, user: User, path: str) -> models.GetFileDownloadResponse:
         result = await _fs_call("GET", "/filesystem/download", params={"path": path})
-        # fs-facade returns {"content": <base64>, "size": <int>}.
-        content = result.get("content") if isinstance(result, dict) else result
-        return models.GetFileDownloadResponse(output=content)
+        # fs-facade returns the IRI-aligned shape: {"output": <base64>}.
+        return models.GetFileDownloadResponse(**result) if isinstance(result, dict) else models.GetFileDownloadResponse(output=result)
 
     async def upload(self, resource: status_models.Resource, user: User, path: str, content: str) -> models.PutFileUploadResponse:
-        try:
-            raw = base64.b64decode(content)
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid base64 upload content: {exc}") from exc
         result = await _fs_call(
             "POST", "/filesystem/upload",
-            params={"path": path},
-            files={"file": (path.rsplit("/", 1)[-1] or "upload", raw, "application/octet-stream")},
+            json_body={"path": path, "content": content},
         )
-        return models.PutFileUploadResponse(
-            output=result if isinstance(result, str) else "File uploaded successfully",
-        )
+        # fs-facade returns the IRI-aligned shape: {"output": "<status message>"}.
+        if isinstance(result, dict):
+            return models.PutFileUploadResponse(**result)
+        return models.PutFileUploadResponse(output=result if isinstance(result, str) else "File uploaded successfully")
 
     # --- Archive ----------------------------------------------------------
 
