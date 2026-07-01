@@ -16,12 +16,14 @@ A simple implementation of the IRI facility API using python and the fastApi lib
 For more information, see: [https://iri.science/](https://iri.science/)
 
 <img src="https://iri.science/images/doe-icon-old.png" height=50 />
+
+<img src="../logo/SLAC_primary_red.png" height=100 />
 """
 
 # version is the openapi.json spec version
 # /api/v1 mount point means it's the latest backward-compatible url
 API_CONFIG = {
-    "title": "IRI Facility API reference implementation",
+    "title": "SLAC IRI API implementation",
     "description": description,
     "version": API_VERSION,
     "docs_url": "/",
@@ -36,7 +38,7 @@ except Exception as exc:
     logger.error(f"Error parsing IRI_API_PARAMS: {exc}")
 
 
-API_URL_ROOT = os.environ.get("API_URL_ROOT", "https://api.iri.nersc.gov")
+API_URL_ROOT = os.environ.get("API_URL_ROOT", "https://iri.slac.stanford.edu")
 API_PREFIX = os.environ.get("API_PREFIX", "/")
 API_URL = os.environ.get("API_URL", "api/v1")
 
