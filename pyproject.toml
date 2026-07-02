@@ -13,6 +13,8 @@ dependencies = [
     "typer>=0.24.1",
     "redis>=7.2.0,<8.0.0",
 ]
+[project.optional-dependencies]
+dev = ["pytest>=9"]
 
 [tool.ruff]
 line-length = 200
