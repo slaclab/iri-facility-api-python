@@ -8,7 +8,7 @@ See it live:
    - API requests: https://api.iri.nersc.gov/api/v2/
 - ALCF instance:
    - API docs: https://api.alcf.anl.gov
-   - API requests: https://api.alcf.anl.gov/api/v2/
+   - API requests: https://api.alcf.anl.gov/api/v1/
 - ESnet instance: https://iri-dev.ppg.es.net
 
 ## Prerequisites
@@ -36,6 +36,27 @@ The reference implementation is meant to be customized for your facility's IRI i
 
 ### Customizing the business logic for your facility
 The IRI API handles the "boilerplate" of setting up the rest API. It delegates to the per-facility business logic via interface definitions. These interfaces are implemented as abstract classes, one per api group (status, account, etc.). Each router directory defines a FacilityAdapter class (eg. [the status adapter](app/routers/status/facility_adapter.py)) that is expected to be implemented by the facility who is exposing an IRI API instance.
+
+## Forwarded Project Header For Compute Requests
+
+Compute submission and update requests support a trusted forwarded header named `X-IRI-Facility-Project`.
+
+This header is intended for deployments where an upstream trusted component has already resolved the caller's project/account into the facility-native value required by the downstream scheduler or execution system.
+
+When `X-IRI-Facility-Project` is present and valid:
+
+- IRI treats that header value as the effective project/account for the compute request.
+- The downstream compute adapter receives the request as if that value were the facility-native account to use for job submission or update.
+- Implementations may surface that effective value in returned job metadata, scheduler requests, labels, annotations, or similar downstream submission context.
+
+For compute submit/update requests, the effective project/account must be specified in exactly one place:
+
+- `job_spec.attributes.account`, or
+- `X-IRI-Facility-Project`
+
+If both are provided, IRI returns `400 Bad Request`.
+If neither is provided, IRI returns `400 Bad Request`.
+This behavior is specific to compute submission/update handling; read-only endpoints are unchanged.
 
 The specific implementations can be specified via the `IRI_API_ADAPTER_*` environment variables. For example the adapter for the `status` api would be given by setting `IRI_API_ADAPTER_status` to the full python module and class implementing `app.routers.status.facility_adapter.FacilityAdapter`. (eg. `IRI_API_ADAPTER_status=myfacility.MyFacilityStatusAdapter`)
 
@@ -116,6 +137,46 @@ Logs always go to stdout. Optionally, logs can also be written to a rotating fil
 | `LOG_ROTATION_DAYS` | `5` | Fallback retention when `IRI_LOG_ROTATION_DAYS` is not set. |
 
 For local development, `make` writes logs to `runtime-logs.log` by default and keeps `5` daily rotated files. Use `make LOG_FILE=/tmp/iri-api.log`, `make IRI_LOG_FILE=/tmp/iri-api.log`, or `make LOG_ROTATION_DAYS=10` to override those defaults. You can also put the same variables in `local.env`.
+
+## Idempotency
+
+Compute `submit_job` and `update_job` endpoints support an optional `Idempotency-Key` request header. When provided, the server caches the first successful response for that key and returns it on any subsequent request with the same key and body — without calling the facility adapter again. This makes it safe for clients to retry on timeout without risking duplicate job submissions.
+
+### Behaviour
+
+| Scenario | Response |
+|---|---|
+| First request | Calls adapter, caches result. Response header: `Idempotency-Key-Reply: miss` |
+| Retry, same body | Returns cached result. Response header: `Idempotency-Key-Reply: hit` |
+| Retry, different body | `422 Unprocessable Entity` |
+| Concurrent duplicate (in-flight) | `409 Conflict` with `Retry-After: 2` |
+| Adapter raises | Lock released; client may retry safely |
+
+### Backing store
+
+| `REDIS_URL` set? | Store used | Suitable for |
+|---|---|---|
+| No (default) | In-process dict | Dev / single-instance |
+| Yes | Redis | Multi-replica production |
+
+For multi-replica deployments, Redis is required. Run a local Redis instance with `make redis`.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDIS_URL` | _(unset)_ | Redis connection URL (e.g. `redis://localhost:6379`). When unset, uses in-memory store. |
+| `IDEMPOTENCY_TTL_SECONDS` | `86400` | How long a cached response is retained after a successful call (24 hours). |
+| `LOCK_TTL_SECONDS` | `60` | Maximum seconds an in-flight request holds the lock. If the IRI process crashes mid-request, the lock auto-expires after this interval so the next retry is treated as a fresh request. Set higher if your facility's scheduler API is known to be slow. |
+
+### Quick start (dev)
+
+```bash
+make redis                          # start Redis container on :6379
+# add to local.env:
+export REDIS_URL=redis://localhost:6379
+make                                # start IRI dev server
+```
 
 ## Docker support
 

@@ -6,16 +6,20 @@ import base64
 import datetime
 import glob
 import grp
+import json
 import os
 import pathlib
 import pwd
 import random
 import stat
 import subprocess
+import time
 import uuid
 
+import redis.asyncio as aioredis
 from fastapi import HTTPException
 from pydantic import BaseModel
+from redis.exceptions import WatchError
 
 from .routers.account import facility_adapter as account_adapter
 from .routers.account import models as account_models
@@ -31,11 +35,13 @@ from .routers.status import facility_adapter as status_adapter
 from .routers.status import models as status_models
 from .routers.task import facility_adapter as task_adapter
 from .routers.task import models as task_models
+from .request_context import get_iri_facility_project
 from .types.models import Capability
 from .types.user import User
 from .types.scalars import AllocationUnit
 from .apilogger import get_stream_logger
 from .config import LOG_LEVEL
+from .idempotency import IdempotencyStore, LockState
 
 logger = get_stream_logger(__name__, LOG_LEVEL)
 
@@ -49,6 +55,153 @@ def paginate_list(items, offset: int | None, limit: int | None):
     if limit is not None and limit >= 0:
         items = items[:limit]
     return items
+
+
+_LOCK_TTL_SECONDS = int(os.environ.get("LOCK_TTL_SECONDS", 60))
+
+
+class InMemoryIdempotencyStore(IdempotencyStore):
+    """In-process dict store. NOT FOR PROD USE. Enable with:
+      IRI_IDEMPOTENCY_STORE=app.demo_adapter.InMemoryIdempotencyStore
+    """
+
+    def __init__(self, ttl: int | None = None):
+        self._ttl = ttl if ttl is not None else int(os.environ.get("IDEMPOTENCY_TTL_SECONDS", "86400"))
+        self._data: dict[str, tuple[dict, float]] = {}
+
+    def _get(self, key: str) -> dict | None:
+        entry = self._data.get(key)
+        if entry is None:
+            return None
+        value, expires_at = entry
+        if time.monotonic() > expires_at:
+            del self._data[key]
+            return None
+        return value
+
+    def _set(self, key: str, value: dict, ttl: int) -> None:
+        self._data[key] = (value, time.monotonic() + ttl)
+
+    def _delete(self, key: str) -> None:
+        self._data.pop(key, None)
+
+    async def check_and_lock(self, cache_key: str, body_hash: str) -> tuple[str, dict | None, int | None]:
+        data = self._get(cache_key)
+
+        if data is None:
+            self._set(cache_key, {"state": LockState.LOCKED, "body_hash": body_hash}, _LOCK_TTL_SECONDS)
+            return ("proceed", None, None)
+
+        if data["state"] == LockState.LOCKED:
+            return ("conflict", None, None)
+
+        if data["state"] == LockState.DONE:
+            if data["body_hash"] != body_hash:
+                return ("fingerprint_mismatch", None, None)
+            return ("hit", data["response_body"], data["response_status"])
+
+        return ("conflict", None, None)
+
+    async def store_result(self, cache_key: str, body_hash: str, response_body: dict, response_status: int) -> None:
+        data = self._get(cache_key)
+        if data is None or data.get("state") != LockState.LOCKED or data.get("body_hash") != body_hash:
+            return
+        self._set(cache_key, {"state": LockState.DONE, "body_hash": body_hash, "response_body": response_body, "response_status": response_status}, self._ttl)
+
+    async def delete_lock(self, cache_key: str) -> None:
+        data = self._get(cache_key)
+        if data is not None and data.get("state") == LockState.LOCKED:
+            self._delete(cache_key)
+
+    async def close(self) -> None:
+        pass
+
+
+class RedisIdempotencyStore(IdempotencyStore):
+    """Redis-backed store. Enable with:
+      IRI_IDEMPOTENCY_STORE=app.demo_adapter.RedisIdempotencyStore
+    Requires: REDIS installed, REDIS_URL env var
+    """
+
+    def __init__(self, redis_url: str | None = None, ttl: int | None = None):
+        _url = redis_url if redis_url is not None else os.environ.get("REDIS_URL", "")
+        if not _url:
+            raise ValueError("REDIS_URL must be set to use RedisIdempotencyStore")
+        self._client = aioredis.from_url(_url, decode_responses=True)
+        self._ttl = ttl if ttl is not None else int(os.environ.get("IDEMPOTENCY_TTL_SECONDS", "86400"))
+
+    def _rkey(self, cache_key: str) -> str:
+        return f"iri:idem:{cache_key}"
+
+    async def check_and_lock(self, cache_key: str, body_hash: str) -> tuple[str, dict | None, int | None]:
+        rkey = self._rkey(cache_key)
+        lock_value = json.dumps({"state": LockState.LOCKED, "body_hash": body_hash})
+
+        is_new = await self._client.set(rkey, lock_value, nx=True, ex=_LOCK_TTL_SECONDS)
+        if is_new:
+            return ("proceed", None, None)
+
+        raw = await self._client.get(rkey)
+        if raw is None:
+            # Key expired between our SET NX and GET; try once more.
+            is_new2 = await self._client.set(rkey, lock_value, nx=True, ex=_LOCK_TTL_SECONDS)
+            if is_new2:
+                return ("proceed", None, None)
+            return ("conflict", None, None)
+
+        data = json.loads(raw)
+        if data["state"] == LockState.LOCKED:
+            return ("conflict", None, None)
+
+        if data["state"] == LockState.DONE:
+            if data["body_hash"] != body_hash:
+                return ("fingerprint_mismatch", None, None)
+            return ("hit", data["response_body"], data["response_status"])
+
+        return ("conflict", None, None)
+
+    async def store_result(self, cache_key: str, body_hash: str, response_body: dict, response_status: int) -> None:
+        """Write DONE only if we still own the lock, using WATCH/MULTI/EXEC optimistic locking."""
+        rkey = self._rkey(cache_key)
+        expected_lock = json.dumps({"state": LockState.LOCKED, "body_hash": body_hash})
+        done_value = json.dumps({"state": LockState.DONE, "body_hash": body_hash, "response_body": response_body, "response_status": response_status})
+
+        async with self._client.pipeline() as pipe:
+            try:
+                await pipe.watch(rkey)
+                if await pipe.get(rkey) != expected_lock:
+                    await pipe.reset()
+                    return
+                pipe.multi()
+                pipe.set(rkey, done_value, ex=self._ttl)
+                await pipe.execute()
+            except WatchError:
+                pass  # key changed between watch and execute; another request owns it now
+
+    async def delete_lock(self, cache_key: str) -> None:
+        """Delete the lock entry only if still in LOCKED state, using WATCH/MULTI/EXEC."""
+        rkey = self._rkey(cache_key)
+
+        async with self._client.pipeline() as pipe:
+            try:
+                await pipe.watch(rkey)
+                current = await pipe.get(rkey)
+                if not current:
+                    await pipe.reset()
+                    return
+                data = json.loads(current)
+                if data.get("state") != LockState.LOCKED:
+                    await pipe.reset()
+                    return
+                pipe.multi()
+                pipe.delete(rkey)
+                await pipe.execute()
+            except WatchError:
+                pass  # key changed between watch and execute; leave it alone
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
 
 class CommandError(RuntimeError):
     """Raised when an external subprocess command fails."""
@@ -113,6 +266,7 @@ class DemoAdapter(
         self.user_allocations = []
         self.facility = {}
         self.locations = {}  # resource_id -> list[StorageInstance templates]
+        self.access_endpoints = {}  # resource_id -> list[AccessEndpoint]
         self.sites = []
         self._init_state()
 
@@ -267,8 +421,6 @@ class DemoAdapter(
                 access=_ro,
                 filesystem="gpfs-homes",
                 performance_tier="medium",
-                quota_bytes=40 * 1024**3,
-                available_bytes=28 * 1024**3,
                 purge_policy_days=None,
                 shared=False,
             ),
@@ -278,8 +430,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="lustre-scratch",
                 performance_tier="high",
-                quota_bytes=20 * 1024**4,
-                available_bytes=14 * 1024**4,
                 purge_policy_days=30,
                 shared=False,
             ),
@@ -289,8 +439,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="gpfs-project",
                 performance_tier="medium",
-                quota_bytes=2 * 1024**4,
-                available_bytes=1024**4,
                 purge_policy_days=None,
                 shared=True,
             ),
@@ -300,8 +448,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="gpfs-cfs",
                 performance_tier="medium",
-                quota_bytes=10 * 1024**4,
-                available_bytes=8 * 1024**4,
                 purge_policy_days=120,
                 shared=True,
             ),
@@ -316,8 +462,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="hpss",
                 performance_tier="tape",
-                quota_bytes=None,
-                available_bytes=None,
                 purge_policy_days=None,
                 shared=False,
             ),
@@ -332,8 +476,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="gpfs-homes",
                 performance_tier="medium",
-                quota_bytes=40 * 1024**3,
-                available_bytes=28 * 1024**3,
                 purge_policy_days=None,
                 shared=False,
             ),
@@ -343,8 +485,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="lustre-scratch",
                 performance_tier="high",
-                quota_bytes=20 * 1024**4,
-                available_bytes=14 * 1024**4,
                 purge_policy_days=30,
                 shared=False,
             ),
@@ -354,8 +494,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="gpfs-project",
                 performance_tier="medium",
-                quota_bytes=2 * 1024**4,
-                available_bytes=1024**4,
                 purge_policy_days=None,
                 shared=True,
             ),
@@ -365,8 +503,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="gpfs-cfs",
                 performance_tier="medium",
-                quota_bytes=10 * 1024**4,
-                available_bytes=8 * 1024**4,
                 purge_policy_days=120,
                 shared=True,
             ),
@@ -376,8 +512,6 @@ class DemoAdapter(
                 access=_ro,
                 filesystem="gpfs-cfs",
                 performance_tier="medium",
-                quota_bytes=None,
-                available_bytes=None,
                 purge_policy_days=None,
                 shared=True,
             ),
@@ -387,8 +521,6 @@ class DemoAdapter(
                 access=_rw,
                 filesystem="tmpfs",
                 performance_tier="high",
-                quota_bytes=512 * 1024**3,
-                available_bytes=480 * 1024**3,
                 purge_policy_days=7,
                 shared=False,
             ),
@@ -396,6 +528,74 @@ class DemoAdapter(
 
         # Login nodes: same filesystem layout as CFS — outside-of-job semantics for everything.
         self.locations[login.id] = self.locations[cfs.id]
+
+        globus_cfs_id = demo_uuid("endpoint", "globus-cfs")
+        globus_hpss_id = demo_uuid("endpoint", "globus-hpss")
+
+        self.access_endpoints[cfs.id] = [
+            storage_models.AccessEndpoint(
+                id="globus-cfs-demo",
+                resource_id=cfs.id,
+                protocol=storage_models.AccessProtocol.globus,
+                display_name="Demo CFS Globus",
+                endpoint_id=globus_cfs_id,
+                uri=f"globus://{globus_cfs_id}/",
+                root_path="/",
+                auth_type="globus",
+                capabilities=[
+                    storage_models.AccessCapability.list,
+                    storage_models.AccessCapability.read,
+                    storage_models.AccessCapability.write,
+                    storage_models.AccessCapability.transfer,
+                ],
+            ),
+            storage_models.AccessEndpoint(
+                id="xrootd-cfs-demo",
+                resource_id=cfs.id,
+                protocol=storage_models.AccessProtocol.xrootd,
+                display_name="Demo CFS XRootD",
+                endpoint="root://cfs.demo.example/",
+                auth_type="x509",
+                capabilities=[
+                    storage_models.AccessCapability.read,
+                    storage_models.AccessCapability.streaming,
+                ],
+            ),
+            storage_models.AccessEndpoint(
+                id="s3-cfs-demo",
+                resource_id=cfs.id,
+                protocol=storage_models.AccessProtocol.s3,
+                display_name="Demo CFS S3",
+                bucket="demo-cfs",
+                region="us-east-1",
+                endpoint_url="https://s3.demo.example",
+                auth_type="aws_s3",
+                capabilities=[
+                    storage_models.AccessCapability.list,
+                    storage_models.AccessCapability.read,
+                    storage_models.AccessCapability.write,
+                ],
+            ),
+        ]
+
+        self.access_endpoints[hpss.id] = [
+            storage_models.AccessEndpoint(
+                id="globus-hpss-demo",
+                resource_id=hpss.id,
+                protocol=storage_models.AccessProtocol.globus,
+                display_name="Demo HPSS Globus",
+                endpoint_id=globus_hpss_id,
+                uri=f"globus://{globus_hpss_id}/",
+                root_path="/home",
+                auth_type="globus",
+                capabilities=[
+                    storage_models.AccessCapability.list,
+                    storage_models.AccessCapability.read,
+                    storage_models.AccessCapability.write,
+                    storage_models.AccessCapability.transfer,
+                ],
+            ),
+        ]
 
         # Populate site resource_ids based on which resources are at each site
         site1.resource_ids = [r.id for r in self.resources if r.site_id == site1.id]
@@ -699,6 +899,8 @@ class DemoAdapter(
         user: User,
         job_spec: compute_models.JobSpec,
     ) -> compute_models.Job:
+        facility_project = get_iri_facility_project()
+        account = facility_project or (job_spec.attributes.account if job_spec.attributes else None)
         return compute_models.Job(
             id="job_123",
             status=compute_models.JobStatus(
@@ -706,7 +908,7 @@ class DemoAdapter(
                 time=utc_timestamp(),
                 message="job submitted",
                 exit_code=0,
-                meta_data={"account": "account1"},
+                meta_data={"account": account},
             ),
         )
 
@@ -717,6 +919,8 @@ class DemoAdapter(
         job_spec: compute_models.JobSpec,
         job_id: str,
     ) -> compute_models.Job:
+        facility_project = get_iri_facility_project()
+        account = facility_project or (job_spec.attributes.account if job_spec.attributes else None)
         return compute_models.Job(
             id=job_id,
             status=compute_models.JobStatus(
@@ -724,7 +928,7 @@ class DemoAdapter(
                 time=utc_timestamp(),
                 message="job updated",
                 exit_code=0,
-                meta_data={"account": "account1"},
+                meta_data={"account": account},
             ),
         )
 
@@ -856,13 +1060,25 @@ class DemoAdapter(
                     path=self._resolve_path(m.path, user, code),
                     filesystem=m.filesystem,
                     performance_tier=m.performance_tier,
-                    quota_bytes=m.quota_bytes,
-                    available_bytes=m.available_bytes,
                     purge_policy_days=m.purge_policy_days,
                     shared=m.shared,
                     access=m.access,
                 ))
         return result
+
+    async def get_access_endpoints(
+        self,
+        resource: status_models.Resource,
+        user: User,
+        protocol: storage_models.AccessProtocol | None,
+        endpoint_id: str | None,
+    ) -> list[storage_models.AccessEndpoint]:
+        endpoints = self.access_endpoints.get(resource.id, [])
+        if protocol:
+            endpoints = [e for e in endpoints if e.protocol == protocol]
+        if endpoint_id:
+            endpoints = [e for e in endpoints if e.id == endpoint_id]
+        return endpoints
 
     def validate_path(self, path: str, allow_symlinks: bool = True) -> str:
         """Validate that the given path is within the sandbox base directory and optionally check for symlinks."""

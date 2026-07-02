@@ -2,6 +2,8 @@
 """Main API application"""
 
 import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from opentelemetry import trace, metrics
@@ -17,7 +19,8 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from . import config
 from .apilogger import configure_logging
-from .request_context import set_api_url_base, _api_url_base
+from .idempotency import create_store
+from .request_context import _api_url_base, _iri_facility_project, set_api_url_base
 
 from app.routers.error_handlers import install_error_handlers
 from app.routers.facility import facility
@@ -54,17 +57,26 @@ if config.OPENTELEMETRY_ENABLED:
         metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[metric_reader]))
 # ------------------------------------------------------------------
 
-APP = FastAPI(servers=[{"url": config.API_URL_ROOT}], **config.API_CONFIG)
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    app.state.idempotency_store = create_store()
+    yield
+    await app.state.idempotency_store.close()
+
+
+APP = FastAPI(servers=[{"url": config.API_URL_ROOT}], lifespan=_lifespan, **config.API_CONFIG)
 
 
 class _ExternalRequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        token = _api_url_base.set(None)
+        url_token = _api_url_base.set(None)
+        facility_project_token = _iri_facility_project.set(None)
         try:
             set_api_url_base(request)
             return await call_next(request)
         finally:
-            _api_url_base.reset(token)
+            _api_url_base.reset(url_token)
+            _iri_facility_project.reset(facility_project_token)
 
 
 APP.add_middleware(_ExternalRequestContextMiddleware)
