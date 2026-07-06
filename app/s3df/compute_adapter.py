@@ -499,13 +499,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 raise RuntimeError(f"Slurm get_job failed: {exc}") from exc
 
         if historical:
-            # Fall back to job history endpoint
-            try:
-                resp = api.slurm_v0041_get_job_history(job_id, _headers=headers)
-                if resp and resp.jobs:
-                    return _job_from_slurm_info(resp.jobs[0], include_spec)
-            except ApiException as exc:
-                raise RuntimeError(f"Slurm job history failed: {exc}") from exc
+            raise HTTPException(status_code=501, detail="Historical job lookup is not implemented yet")
 
         raise RuntimeError(f"Job {job_id} not found")
 
