@@ -496,12 +496,13 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 return _job_from_slurm_info(resp.jobs[0], include_spec)
         except ApiException as exc:
             if exc.status != 404:
-                raise RuntimeError(f"Slurm get_job failed: {exc}") from exc
+                logger.exception("Slurm get_job failed for job %s", job_id)
+                raise HTTPException(status_code=500, detail="Slurm get_job failed") from exc
 
         if historical:
             raise HTTPException(status_code=501, detail="Historical job lookup is not implemented yet")
 
-        raise RuntimeError(f"Job {job_id} not found")
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     # -- get_jobs -----------------------------------------------------------
 
