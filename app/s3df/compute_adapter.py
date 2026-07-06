@@ -38,7 +38,7 @@ from slurmrestd_client.models.slurm_v0041_post_job_submit_request_jobs_inner_tim
 from slurmrestd_client.models.slurm_v0041_post_job_submit_request_jobs_inner_memory_per_cpu import (
     SlurmV0041PostJobSubmitRequestJobsInnerMemoryPerCpu,
 )
-from fastapi import HTTPException, Response
+from fastapi import HTTPException
 from pydantic import ConfigDict, ValidationError
 
 from ..routers.compute import models as compute_models
@@ -524,15 +524,14 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         """POST /compute/status/{resource_id}"""
         api, headers = self._get_slurm_context(user)
 
+        if historical:
+            raise HTTPException(status_code=501, detail="Historical job listing is not implemented yet")
+
         try:
-            if historical:
-                # resp = api.slurm_v0041_get_jobs_history(_headers=headers)
-                # return a 501 not implemented as we don't want to hit the slurmdb 
-                return Response(status_code=501, content="Historical job listing is not implemented yet")
-            else:
-                resp = api.slurm_v0041_get_jobs(_headers=headers)
+            resp = api.slurm_v0041_get_jobs(_headers=headers)
         except ApiException as exc:
-            raise RuntimeError(f"Slurm get_jobs failed: {exc}") from exc
+            logger.exception("Slurm get_jobs failed")
+            raise HTTPException(status_code=500, detail="Slurm get_jobs failed") from exc
 
         
         jobs = resp.jobs or []
