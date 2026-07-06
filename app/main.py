@@ -2,7 +2,9 @@
 """Main API application"""
 
 import logging
+from pathlib import Path
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware
 from opentelemetry.sdk.resources import Resource
@@ -49,6 +51,10 @@ if config.OPENTELEMETRY_ENABLED:
 # ------------------------------------------------------------------
 
 app = FastAPI(servers=[{"url": config.API_URL_ROOT}], **config.API_CONFIG)
+
+logo_dir = Path(__file__).resolve().parent / "logo"
+if logo_dir.is_dir():
+    app.mount("/logo", StaticFiles(directory=str(logo_dir)), name="logo")
 
 
 class _ExternalRequestContextMiddleware(BaseHTTPMiddleware):
