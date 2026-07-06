@@ -45,11 +45,11 @@ async def test_get_resources_merges_registry_and_status(monkeypatch):
     resources = await adapter.get_resources(offset=0, limit=100)
     assert len(resources) == len(S3DF_RESOURCES)
     by_id = {r.id: r for r in resources}
-    bastions = by_id["s3df-ssh-bastions"]
-    assert bastions.name == "SSH Bastions"
-    assert bastions.group == "access"
-    assert bastions.resource_type is status_models.ResourceType.service
-    assert bastions.current_status is status_models.Status.up
+    ada = by_id["ada"]
+    assert ada.name == "Batch (ada)"
+    assert ada.group == "compute"
+    assert ada.resource_type is status_models.ResourceType.compute
+    assert ada.current_status is status_models.Status.up
 
 
 @pytest.mark.asyncio
@@ -57,15 +57,15 @@ async def test_get_resources_filter_by_group(monkeypatch):
     adapter, _ = _make_adapter(monkeypatch)
     resources = await adapter.get_resources(offset=0, limit=100, group="compute")
     ids = {r.id for r in resources}
-    assert ids == {"s3df-interactive-nodes", "s3df-batch-servers", "s3df-slurm"}
+    assert ids == {"ada", "ampere", "turing", "milano", "torino", "roma", "hopper"}
 
 
 @pytest.mark.asyncio
 async def test_get_resources_filter_by_current_status(monkeypatch):
-    payload = _statuses_payload({"s3df-storage": "down", "s3df-dtns": "degraded"})
+    payload = _statuses_payload({"sdfhome": "down", "sdfdata": "degraded"})
     adapter, _ = _make_adapter(monkeypatch, list_resources=payload)
     down = await adapter.get_resources(offset=0, limit=100, current_status=status_models.Status.down)
-    assert [r.id for r in down] == ["s3df-storage"]
+    assert [r.id for r in down] == ["sdfhome"]
 
 
 @pytest.mark.asyncio
@@ -91,7 +91,7 @@ async def test_get_resource_unknown_returns_none(monkeypatch):
 async def test_get_resource_known_id(monkeypatch):
     async def get_resource(_id):
         return {
-            "resource_id": "s3df-coact",
+            "resource_id": "ada",
             "status": "degraded",
             "last_changed_at": "2026-06-01T12:00:00Z",
             "last_poll": "2026-06-01T12:00:00Z",
@@ -101,9 +101,9 @@ async def test_get_resource_known_id(monkeypatch):
     adapter = S3DFStatusAdapter.__new__(S3DFStatusAdapter)
     adapter._client = AsyncMock()
     adapter._client.get_resource_status = AsyncMock(side_effect=get_resource)
-    res = await adapter.get_resource("s3df-coact")
+    res = await adapter.get_resource("ada")
     assert res is not None
-    assert res.id == "s3df-coact"
+    assert res.id == "ada"
     assert res.current_status is status_models.Status.degraded
 
 

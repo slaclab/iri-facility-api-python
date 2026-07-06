@@ -17,7 +17,7 @@ For more information, see: [https://iri.science/](https://iri.science/)
 
 <img src="https://iri.science/images/doe-icon-old.png" height=50 />
 
-<img src="../logo/SLAC_primary_red.png" height=100 />
+<img src="/logo/SLAC_primary_red.png" height=100 />
 """
 
 # version is the openapi.json spec version
