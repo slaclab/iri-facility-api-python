@@ -495,7 +495,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             if resp and resp.jobs:
                 return _job_from_slurm_info(resp.jobs[0], include_spec)
         except ApiException as exc:
-            if exc.status != 414:
+            if exc.status != 404:
                 raise RuntimeError(f"Slurm get_job failed: {exc}") from exc
 
         if historical:
