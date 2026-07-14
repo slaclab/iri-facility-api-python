@@ -24,6 +24,7 @@ from app.s3df.auth.authenticated_adapter import S3DFAuthenticatedAdapter
 import jwt  # PyJWT
 from slurmrestd_client.api_client import ApiClient
 from slurmrestd_client.api.slurm_api import SlurmApi
+from slurmrestd_client.api.slurmdb_api import SlurmdbApi
 from slurmrestd_client.configuration import Configuration
 from slurmrestd_client.exceptions import ApiException
 from slurmrestd_client.models.slurm_v0041_post_job_submit_request import (
@@ -134,14 +135,23 @@ def _mint_slurm_jwt(unix_username: str) -> str:
 # slurmrestd_client helpers
 # ---------------------------------------------------------------------------
 
-def _build_slurm_api(token: str) -> SlurmApi:
+def _build_api_client(token: str) -> ApiClient:
     url = os.environ.get("SLURM_REST_URL")
     if not url:
         raise RuntimeError("SLURM_REST_URL environment variable is not set")
     cfg = Configuration(host=url)
     cfg.verify_ssl = False #os.environ.get("SLURM_VERIFY_SSL", "true").lower() == "true"
     # api_key on the config is not used for header auth — we pass headers manually
-    return SlurmApi(ApiClient(cfg))
+    return ApiClient(cfg)
+
+
+def _build_slurm_api(token: str) -> SlurmApi:
+    return SlurmApi(_build_api_client(token))
+
+
+def _build_slurmdb_api(token: str) -> SlurmdbApi:
+    """Client for the Slurm accounting DB (slurmdbd) endpoints."""
+    return SlurmdbApi(_build_api_client(token))
 
 
 def _auth_headers(unix_username: str, token: str) -> dict:
@@ -208,6 +218,59 @@ def _job_from_slurm_info(job_info, include_spec: bool = False) -> dict:
             },
         }
     return job_dict
+
+def _job_from_slurmdb_info(job_record, include_spec: bool = False) -> dict:
+    """
+    Convert a slurmdbd accounting record (sacct-backed) to a plain dict that
+    IRI can deserialise into its Job model.
+
+    The accounting record has a different shape than the live-scheduler job
+    object handled by `_job_from_slurm_info`:
+      - the final state lives under `state.current` (a list of strings)
+      - the numeric id is `job_id`, the wall-clock limit is under `time.limit`
+    The returned dict shape is kept identical to `_job_from_slurm_info` so the
+    router's `models.Job` deserialisation is unchanged.
+    """
+    state_obj = getattr(job_record, "state", None)
+    current = getattr(state_obj, "current", None) if state_obj is not None else None
+    state_str = _map_state(current)
+
+    status: dict = {"state": state_str}
+    exit_code = getattr(job_record, "exit_code", None)
+    return_code = getattr(exit_code, "return_code", None) if exit_code is not None else None
+    if return_code is not None and getattr(return_code, "set", False):
+        status["exit_code"] = getattr(return_code, "number", None)
+
+    job_dict = {
+        "id": str(job_record.job_id),
+        "status": status,
+    }
+
+    if include_spec:
+        time_obj = getattr(job_record, "time", None)
+        tl = getattr(time_obj, "limit", None) if time_obj is not None else None
+        if tl is not None and getattr(tl, "set", False):
+            duration_secs = int(getattr(tl, "number", 0) or 0) * 60
+        else:
+            duration_secs = 0
+
+        # NB: the model field is `job_spec` (compute_models.Job). The live-job
+        # helper `_job_from_slurm_info` uses the key "spec", which does not match
+        # and is silently dropped by IRIBaseModel's serializer — a pre-existing
+        # bug in that helper's include_spec path.
+        job_dict["job_spec"] = {
+            "name": getattr(job_record, "name", None),
+            "resources": {
+                "node_count": getattr(job_record, "allocation_nodes", None),
+            },
+            "attributes": {
+                "queue_name": getattr(job_record, "partition", None),
+                "account": getattr(job_record, "account", None),
+                "duration": duration_secs,
+            },
+        }
+    return job_dict
+
 
 def _build_batch_script(job_spec: compute_models.JobSpec) -> str:
     """
@@ -287,6 +350,18 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         api = _build_slurm_api(token)
         headers = _auth_headers(unix_user, token)
         return api, headers
+
+    def _get_slurmdb_context(self, user):
+        """Return (slurmdb_api, headers, unix_user) for the authenticated user.
+
+        The per-user JWT (`sun` claim) scopes accounting results to this user via
+        Slurm accounting permissions, so no separate username filter is required.
+        """
+        unix_user = getattr(user, "unix_username", user.id)
+        token = _mint_slurm_jwt(unix_user)
+        api = _build_slurmdb_api(token)
+        headers = _auth_headers(unix_user, token)
+        return api, headers, unix_user
     
     
     # -- submit_job ---------------------------------------------------------
@@ -500,7 +575,31 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 raise HTTPException(status_code=500, detail="Slurm get_job failed") from exc
 
         if historical:
-            raise HTTPException(status_code=501, detail="Historical job lookup is not implemented yet")
+            # The job is no longer live — fall back to slurmdbd (accounting DB)
+            # for its final state. Query by job_id alone
+            dbapi, db_headers, unix_user = self._get_slurmdb_context(user)
+            try:
+                db_resp = dbapi.slurmdb_v0041_get_job(str(job_id), _headers=db_headers)
+            except ApiException as exc:
+                if exc.status == 404:
+                    raise HTTPException(status_code=404, detail=f"Job {job_id} not found") from exc
+                logger.exception("slurmdbd get_job failed for job %s", job_id)
+                raise HTTPException(status_code=500, detail="Slurm accounting lookup failed") from exc
+
+            records = (db_resp.jobs if db_resp else None) or []
+            # A job_id can map to multiple accounting records (job arrays /
+            # duplicate submissions); the last is the most recent.
+            record = records[-1] if records else None
+            if record is None:
+                raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+            # Defense in depth: the JWT already scopes results to this user, but
+            # never surface another user's job even if that ever changes.
+            record_user = getattr(record, "user", None)
+            if record_user and record_user != unix_user:
+                raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+            return _job_from_slurmdb_info(record, include_spec)
 
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -520,6 +619,10 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         api, headers = self._get_slurm_context(user)
 
         if historical:
+            # Historical *listing* would query slurmdbd's /jobs endpoint
+            # (e.g. by users=), which scans a user's entire accounting history
+            # and can be expensive. Only single-job historical lookup (get_job)
+            # is supported for now; revisit listing once load is characterised.
             raise HTTPException(status_code=501, detail="Historical job listing is not implemented yet")
 
         try:
