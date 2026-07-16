@@ -22,7 +22,7 @@ For more information, see: [https://iri.science/](https://iri.science/)
 
 <img src="https://iri.science/images/doe-icon-old.png" height=50 />
 
-<img src="/logo/SLAC_primary_red.png" height=100 />
+<img src="logo/SLAC_primary_red.png" height=100 />
 """
 
 # version is the openapi.json spec version
@@ -53,7 +53,7 @@ OTEL_METRIC_EXPORT_INTERVAL = int(os.environ.get("OTEL_METRIC_EXPORT_INTERVAL", 
 
 # Idempotency store
 # IRI_IDEMPOTENCY_STORE: fully-qualified class to use as the backing store.
-#   Example: IRI_IDEMPOTENCY_STORE=app.demo_adapter.DemoRedisIdempotencyStore
+#   Example: IRI_IDEMPOTENCY_STORE=app.demo_adapter.RedisIdempotencyStore
 IRI_IDEMPOTENCY_STORE = os.environ.get("IRI_IDEMPOTENCY_STORE", "")
 IDEMPOTENCY_TTL_SECONDS = int(os.environ.get("IDEMPOTENCY_TTL_SECONDS", "86400"))
 LOCK_TTL_SECONDS = int(os.environ.get("LOCK_TTL_SECONDS", "60"))

@@ -79,6 +79,7 @@ redis: ## Start a local Redis container for idempotency (dev only)
 		docker start $(REDIS_CONTAINER) 2>/dev/null || true
 	@echo "Redis running on localhost:$(REDIS_PORT)"
 	@echo "Add to local.env:"
+	@echo "  export IRI_IDEMPOTENCY_STORE=app.demo_adapter.RedisIdempotencyStore"
 	@echo "  export REDIS_URL=redis://localhost:$(REDIS_PORT)"
 	@echo "  export IDEMPOTENCY_TTL_SECONDS=86400  # cache TTL (default: 24h)"
 	@echo "  export LOCK_TTL_SECONDS=60            # in-flight lock TTL (default: 60s)"

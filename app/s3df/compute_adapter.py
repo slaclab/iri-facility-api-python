@@ -8,9 +8,10 @@ Auth model: IRI acts as JWT broker.
 - slurmrestd validates it locally — no external auth call.
 
 Required env vars:
-  SLURM_REST_URL        e.g. http://slurmrestd:6820
-  SLURM_JWT_KEY_PATH    path to jwt_hs256.key file (binary, 32 bytes)
-  SLURM_JWT_LIFETIME    JWT lifetime in seconds (default: 3600)
+    SLURM_REST_URL        e.g. http://slurmrestd:6820
+    SLURM_JWT             base64-encoded jwt_hs256.key contents
+    SLURM_JWT_LIFETIME    JWT lifetime in seconds (default: 3600)
+    SLURM_VERIFY_SSL      verify slurmrestd TLS certificates (default: false)
 """
 
 import os
@@ -107,8 +108,9 @@ PARTITION_GPU_TYPE: dict[str, str] = {
 
 def _load_jwt_key() -> bytes:
     """Load the HS256 shared key from environment variable."""
-    key_str = os.environ.get("slurm_jwt")
-    
+    key_str = os.environ.get("SLURM_JWT") or os.environ.get("slurm_jwt")
+    if not key_str:
+        raise RuntimeError("SLURM_JWT environment variable is not set")
     return base64.b64decode(key_str)
 
 def _mint_slurm_jwt(unix_username: str) -> str:
@@ -141,7 +143,7 @@ def _build_api_client(token: str) -> ApiClient:
     if not url:
         raise RuntimeError("SLURM_REST_URL environment variable is not set")
     cfg = Configuration(host=url)
-    cfg.verify_ssl = False #os.environ.get("SLURM_VERIFY_SSL", "true").lower() == "true"
+    cfg.verify_ssl = os.environ.get("SLURM_VERIFY_SSL", "false").lower() in {"true", "1", "on", "yes"}
     # api_key on the config is not used for header auth — we pass headers manually
     return ApiClient(cfg)
 

@@ -122,7 +122,7 @@ Links to data, created by this api, will concatenate these values producing link
 
   Each value is a `module.path.ClassName` string. `app.demo_adapter.DemoAdapter` implements all of them and is what `make dev` wires up by default. A router whose `IRI_API_ADAPTER_*` is not set is hidden from the API at startup unless `IRI_SHOW_MISSING_ROUTES=true`.
 
-- `IRI_SHOW_MISSING_ROUTES`: hide api groups that don't have an `IRI_API_ADAPTER_*` environment variable defined, if set to `true`. This way if your facility only wishes to expose some api groups but not others, they can be hidden. (Defaults to `false`.)
+- `IRI_SHOW_MISSING_ROUTES`: show API groups through `DemoAdapter` when they do not have an `IRI_API_ADAPTER_*` environment variable. Leave this `false` to hide unconfigured groups. (Defaults to `false`.)
 
 ### Logging
 
@@ -154,10 +154,10 @@ Compute `submit_job` and `update_job` endpoints support an optional `Idempotency
 
 ### Backing store
 
-| `REDIS_URL` set? | Store used | Suitable for |
+| `IRI_IDEMPOTENCY_STORE` | Store used | Suitable for |
 |---|---|---|
-| No (default) | In-process dict | Dev / single-instance |
-| Yes | Redis | Multi-replica production |
+| Unset (default) | In-process dict | Dev / single-instance |
+| `app.demo_adapter.RedisIdempotencyStore` | Redis at `REDIS_URL` | Multi-replica production |
 
 For multi-replica deployments, Redis is required. Run a local Redis instance with `make redis`.
 
@@ -165,7 +165,8 @@ For multi-replica deployments, Redis is required. Run a local Redis instance wit
 
 | Variable | Default | Description |
 |---|---|---|
-| `REDIS_URL` | _(unset)_ | Redis connection URL (e.g. `redis://localhost:6379`). When unset, uses in-memory store. |
+| `IRI_IDEMPOTENCY_STORE` | `app.demo_adapter.InMemoryIdempotencyStore` | Fully qualified idempotency store class. Use `app.demo_adapter.RedisIdempotencyStore` for Redis. |
+| `REDIS_URL` | _(unset)_ | Redis connection URL (e.g. `redis://localhost:6379`) used by `RedisIdempotencyStore`. |
 | `IDEMPOTENCY_TTL_SECONDS` | `86400` | How long a cached response is retained after a successful call (24 hours). |
 | `LOCK_TTL_SECONDS` | `60` | Maximum seconds an in-flight request holds the lock. If the IRI process crashes mid-request, the lock auto-expires after this interval so the next retry is treated as a fresh request. Set higher if your facility's scheduler API is known to be slow. |
 
@@ -174,6 +175,7 @@ For multi-replica deployments, Redis is required. Run a local Redis instance wit
 ```bash
 make redis                          # start Redis container on :6379
 # add to local.env:
+export IRI_IDEMPOTENCY_STORE=app.demo_adapter.RedisIdempotencyStore
 export REDIS_URL=redis://localhost:6379
 make                                # start IRI dev server
 ```
