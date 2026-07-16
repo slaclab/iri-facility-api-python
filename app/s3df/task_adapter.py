@@ -26,6 +26,7 @@ from app.routers.status import models as status_models
 from app.types.user import User
 
 LOG = logging.getLogger(__name__)
+_COMPRESSION_URN_PREFIX = "urn:doe-iri:compression:"
 
 
 def _model_dict(val) -> dict:
@@ -33,6 +34,16 @@ def _model_dict(val) -> dict:
     if hasattr(val, "model_dump"):
         return {k: v for k, v in val.model_dump().items() if v is not None}
     return {k: v for k, v in val.items() if v is not None}
+
+
+def _filesystem_request_body(val) -> dict:
+    """Serialize a request model and normalize values for the fs-facade API."""
+    body = _model_dict(val)
+    compression = body.get("compression")
+    if compression is not None:
+        raw_value = getattr(compression, "value", compression)
+        body["compression"] = str(raw_value).removeprefix(_COMPRESSION_URN_PREFIX)
+    return body
 
 
 def _strip_none(d: dict) -> dict:
@@ -90,10 +101,10 @@ async def _submit_to_fs_facade(task: task_models.TaskCommand) -> str:
             json_body=_model_dict(args["request_model"]), headers=auth)
     if cmd == "compress":
         return await client.submit("POST", "/filesystem/compress",
-            json_body=_model_dict(args["request_model"]), headers=auth)
+            json_body=_filesystem_request_body(args["request_model"]), headers=auth)
     if cmd == "extract":
         return await client.submit("POST", "/filesystem/extract",
-            json_body=_model_dict(args["request_model"]), headers=auth)
+            json_body=_filesystem_request_body(args["request_model"]), headers=auth)
     if cmd == "mv":
         return await client.submit("POST", "/filesystem/mv",
             json_body=_model_dict(args["request_model"]), headers=auth)

@@ -45,6 +45,7 @@ from pydantic import ConfigDict, ValidationError
 from ..routers.compute import models as compute_models
 from ..types.user import User
 from ..routers.status import models as status_models
+from ..request_context import get_iri_facility_project
 import shlex
 
 logger = logging.getLogger(__name__)
@@ -205,7 +206,7 @@ def _job_from_slurm_info(job_info, include_spec: bool = False) -> dict:
         else:
             duration_secs = 0
 
-        job_dict["spec"] = {
+        job_dict["job_spec"] = {
             "name": getattr(job_info, "name", None),
             "executable": getattr(job_info, "batch_script", None),
             "resources": {
@@ -254,10 +255,6 @@ def _job_from_slurmdb_info(job_record, include_spec: bool = False) -> dict:
         else:
             duration_secs = 0
 
-        # NB: the model field is `job_spec` (compute_models.Job). The live-job
-        # helper `_job_from_slurm_info` uses the key "spec", which does not match
-        # and is silently dropped by IRIBaseModel's serializer — a pre-existing
-        # bug in that helper's include_spec path.
         job_dict["job_spec"] = {
             "name": getattr(job_record, "name", None),
             "resources": {
@@ -411,7 +408,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             reservation = job_spec.attributes.reservation_id
 
         partition = partition or os.environ.get("SLURM_DEFAULT_PARTITION")
-        account = account or os.environ.get("SLURM_DEFAULT_ACCOUNT")
+        account = account or get_iri_facility_project() or os.environ.get("SLURM_DEFAULT_ACCOUNT")
 
         if job_spec.resources:
             node_count = job_spec.resources.node_count or 1
@@ -476,7 +473,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             )
         except ApiException as exc:
             logger.error("submit_job failed: %s", exc)
-            raise RuntimeError(f"Slurm submission failed: {exc}") from exc
+            raise HTTPException(status_code=500, detail="Slurm submission failed") from exc
 
     # -- submit_job_script --------------------------------------------------
 
@@ -513,7 +510,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
 
     # -- update_job ---------------------------------------------------------
 
-    async def update_job(self, resource, user, job_spec, job_id: str) -> dict:
+    async def update_job(self, resource, user, job_spec, job_id: str) -> compute_models.Job:
         """
         PUT /compute/job/{resource_id}/{job_id}
 
@@ -541,15 +538,19 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 partition = getattr(attributes, "queue_name", None)
                 if partition:
                     update_fields["partition"] = partition
+                account = getattr(attributes, "account", None) or get_iri_facility_project()
+                if account:
+                    update_fields["account"] = account
 
         try:
             # v0041 job update endpoint
             api.slurm_v0041_post_job(job_id, update_fields, _headers=headers)
         except ApiException as exc:
             logger.error("update_job %s failed: %s", job_id, exc)
-            raise RuntimeError(f"Slurm update failed for job {job_id}: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"Slurm update failed for job {job_id}") from exc
 
-        return await self.get_job(resource, user, job_id)
+        job = await self.get_job(resource, user, job_id)
+        return compute_models.Job.model_validate(job)
 
     # -- get_job ------------------------------------------------------------
 
@@ -655,4 +656,4 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             logger.info("Cancelled job %s", job_id)
             return True
         except ApiException as exc:
-            raise RuntimeError(f"Slurm cancel failed for job {job_id}: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"Slurm cancel failed for job {job_id}") from exc

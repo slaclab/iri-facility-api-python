@@ -23,8 +23,9 @@ class ResourceMeta:
     name: str
     description: str
     group: str
-    resource_type: status_models.ResourceType
+    resource_type: status_models.ResourceTypeValue
     capability_ids: list[str] = field(default_factory=list)
+    supported_endpoints: tuple[status_models.Endpoint, ...] = ()
 
 
 # 11 resources, ids/names/groups from s3df-status-api/resources.yaml.
@@ -37,6 +38,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Slurm batch partition for Ada GPU nodes.",
             group="compute",
             resource_type=status_models.ResourceType.compute,
+            supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
             id="ampere",
@@ -44,6 +46,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Slurm batch partition for Ampere GPU nodes.",
             group="compute",
             resource_type=status_models.ResourceType.compute,
+            supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
             id="turing",
@@ -51,6 +54,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Slurm batch partition for Turing GPU nodes.",
             group="compute",
             resource_type=status_models.ResourceType.compute,
+            supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
             id="milano",
@@ -58,6 +62,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Slurm batch partition for Milano CPU nodes.",
             group="compute",
             resource_type=status_models.ResourceType.compute,
+            supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
             id="torino",
@@ -65,6 +70,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Slurm batch partition for Torino CPU nodes.",
             group="compute",
             resource_type=status_models.ResourceType.compute,
+            supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
             id="roma",
@@ -72,6 +78,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Slurm batch partition for Roma CPU nodes.",
             group="compute",
             resource_type=status_models.ResourceType.compute,
+            supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
             id="hopper",
@@ -79,6 +86,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Slurm batch partition for Hopper GPU nodes.",
             group="compute",
             resource_type=status_models.ResourceType.compute,
+            supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
             id="sdfhome",
@@ -86,6 +94,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Weka cluster for home directories (/sdf/home).",
             group="storage",
             resource_type=status_models.ResourceType.storage,
+            supported_endpoints=(status_models.Endpoint.filesystem,),
         ),
         ResourceMeta(
             id="sdfdata",
@@ -93,6 +102,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Weka cluster for project/group data (sdfdata).",
             group="storage",
             resource_type=status_models.ResourceType.storage,
+            supported_endpoints=(status_models.Endpoint.filesystem,),
         ),
         ResourceMeta(
             id="sdfk8s",
@@ -107,6 +117,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             description="S3DF Weka cluster for scratch storage (/sdf/scratch).",
             group="storage",
             resource_type=status_models.ResourceType.storage,
+            supported_endpoints=(status_models.Endpoint.filesystem,),
         ),
     )
 }

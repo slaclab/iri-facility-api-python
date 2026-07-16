@@ -74,6 +74,7 @@ def _build_resource(meta: ResourceMeta, status_payload: dict | None) -> status_m
         group=meta.group,
         resource_type=meta.resource_type,
         capability_ids=list(meta.capability_ids),
+        supported_endpoints=list(meta.supported_endpoints),
         current_status=current_status,
         last_modified=last_modified,
     )
@@ -168,7 +169,7 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         description: str | None = None,
         group: str | None = None,
         modified_since: datetime.datetime | None = None,
-        resource_type: status_models.ResourceType | None = None,
+        resource_type: status_models.ResourceTypeValue | None = None,
         current_status: status_models.Status | None = None,
         capability=None,
         site_id: str | None = None,
@@ -186,6 +187,13 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
             site_id=site_id,
         )
         return _paginate(items, offset, limit)
+
+    async def get_resources_for_endpoint(
+        self,
+        endpoint: status_models.Endpoint,
+    ) -> list[status_models.Resource]:
+        resources = await self._all_resources()
+        return [resource for resource in resources if endpoint in resource.supported_endpoints]
 
     async def get_resource(self, id_: str) -> status_models.Resource | None:
         meta = S3DF_RESOURCES.get(id_)

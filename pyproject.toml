@@ -15,14 +15,21 @@ dependencies = [
     "gql[httpx]>=3.5.0",
     "pyjwt[crypto]>=2.8.0",
     "slurmrestd-client>=1.0.0",
+    "redis>=7.2.0,<8.0.0",
 ]
 
 [tool.uv.sources]
 slurmrestd-client = { path = "app/s3df/slurm/slurmrestd_client-1.0.0-py3-none-any.whl" }
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=9",
+    "pytest-asyncio>=0.23",
+]
+
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9",
     "pytest-asyncio>=0.23",
 ]
 

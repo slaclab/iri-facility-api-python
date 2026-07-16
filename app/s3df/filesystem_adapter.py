@@ -27,6 +27,13 @@ from app.routers.status import models as status_models
 from app.request_context import get_auth_headers
 
 LOG = logging.getLogger(__name__)
+_COMPRESSION_URN_PREFIX = "urn:doe-iri:compression:"
+
+
+def _compression_name(value) -> str:
+    """Convert an IRI compression URN to the short name expected by fs-facade."""
+    raw_value = getattr(value, "value", value) or "gzip"
+    return str(raw_value).removeprefix(_COMPRESSION_URN_PREFIX)
 
 
 async def _fs_call(method: str, path: str, **kwargs):
@@ -244,7 +251,7 @@ class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityA
         body = {
             "path": request_model.path,
             "target_path": request_model.target_path,
-            "compression": request_model.compression.value if request_model.compression else "gzip",
+            "compression": _compression_name(request_model.compression),
             "dereference": request_model.dereference,
         }
         result = await _fs_call("POST", "/filesystem/compress", json_body=body)
@@ -254,7 +261,7 @@ class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityA
         body = {
             "path": request_model.path,
             "target_path": request_model.target_path,
-            "compression": request_model.compression.value if request_model.compression else "gzip",
+            "compression": _compression_name(request_model.compression),
         }
         result = await _fs_call("POST", "/filesystem/extract", json_body=body)
         return models.PostExtractResponse(output=_file_model(result))

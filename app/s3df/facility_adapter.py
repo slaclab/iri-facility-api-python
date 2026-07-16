@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from app.routers.facility import models as facility_models
 from app.routers.facility import facility_adapter
-import uuid
+from app.s3df.config import settings
 
 
 class S3DFFacilityAdapter(facility_adapter.FacilityAdapter):
@@ -19,9 +19,10 @@ class S3DFFacilityAdapter(facility_adapter.FacilityAdapter):
 
     def __init__(self):
         now = datetime.datetime.now(datetime.timezone.utc)
+        site_id = settings.facility_name or "s3df"
 
         self.site = facility_models.Site(
-            id=str(uuid.uuid4()),
+            id=site_id,
             name="SLAC National Accelerator Laboratory",          
             description="We explore how the universe works at the biggest, smallest and fastest scales and invent powerful tools used by scientists around the globe. Our research helps solve real-world problems and advances the interests of the nation.",   
             last_modified=now,
@@ -37,7 +38,7 @@ class S3DFFacilityAdapter(facility_adapter.FacilityAdapter):
         )
 
         self.facility = facility_models.Facility(
-            id=str(uuid.uuid4()),
+            id=f"{site_id}-facility",
             name="SLAC Shared Science Data Facility",                 
             description="S3DF is a compute, storage, and network architecture designed to support massive scale analytics required by SLAC experimental facilities and programs, including LCLS/LCLS-II, Vera C. Rubin Observatory, UED, and the Stanford-SLAC cryoEM Center (S2C2)", 
             last_modified=now,
