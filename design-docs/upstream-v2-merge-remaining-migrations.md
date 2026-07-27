@@ -133,15 +133,19 @@ Also decide whether `S3DFFilesystemAdapter` is a supported direct integration or
 
 ### Storage
 
-No `S3DFStorageAdapter` exists. The current deployment decision is to hide `/storage` by leaving `IRI_API_ADAPTER_storage` unset and `IRI_SHOW_MISSING_ROUTES=false`.
+`S3DFStorageAdapter` now implements and wires the initial static storage scope:
 
-If storage becomes release scope, implement:
+- `sdfhome` resolves to `/sdf/home/{username[0]}/{username}`;
+- remote access endpoints are empty;
+- project/allocation discovery and resources other than `sdfhome` return `501`;
+- no CoAct, filesystem, fs-facade, UID/GID, or ACL discovery is performed.
 
-1. `get_locations()` for S3DF home, project, scratch, campaign, and archive policies.
-2. `get_access_endpoints()` for approved Globus, XRootD, or S3 endpoints.
-3. POSIX identity and CoAct project authorization for returned locations.
-4. Deployment configuration and package exports.
-5. Unit, OpenAPI, and service-level tests.
+The following dynamic expansion remains deferred:
+
+1. Project, scratch, campaign, and archive path discovery.
+2. Approved Globus, XRootD, or S3 endpoints.
+3. POSIX identity, CoAct entitlement, and effective-access verification where needed.
+4. OpenAPI and service-level tests in a dependency-complete environment.
 
 Do not expose the demo storage adapter in an S3DF deployment.
 

@@ -9,6 +9,7 @@ from .account_adapter import S3DFAccountAdapter
 from .facility_adapter import S3DFFacilityAdapter
 from .compute_adapter import SLACComputeAdapter
 from .status_adapter import S3DFStatusAdapter
+from .storage_adapter import S3DFStorageAdapter
 from .config import settings
 
-__all__ = ["S3DFAccountAdapter", "S3DFFacilityAdapter", "SLACComputeAdapter", "S3DFStatusAdapter", "settings"]
+__all__ = ["S3DFAccountAdapter", "S3DFFacilityAdapter", "SLACComputeAdapter", "S3DFStatusAdapter", "S3DFStorageAdapter", "settings"]

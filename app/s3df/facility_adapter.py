@@ -44,8 +44,7 @@ class S3DFFacilityAdapter(facility_adapter.FacilityAdapter):
             last_modified=now,
             short_name="S3DF",           
             organization_name="S3DF",   
-            support_uri="https://s3df.slac.stanford.edu",
-            self_uri="https://s3df-dev.slac.stanford.edu/api/v1/facility",        
+            support_uri="https://iri.slac.stanford.edu",
             site_ids=[self.site.id],
         )
 

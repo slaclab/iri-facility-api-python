@@ -50,6 +50,7 @@ dev-s3df: deps
 	@source $(BIN)/activate && \
 	IRI_API_ADAPTER_account=app.s3df.account_adapter.S3DFAccountAdapter \
 	IRI_API_ADAPTER_status=app.s3df.status_adapter.S3DFStatusAdapter \
+	IRI_API_ADAPTER_storage=app.s3df.storage_adapter.S3DFStorageAdapter \
 	COACT_API_URL='https://coact-dev.slac.stanford.edu/graphql-service-dev' \
 	IRI_SHOW_MISSING_ROUTES='true' \
 	API_URL_ROOT='http://127.0.0.1:8000' fastapi dev
