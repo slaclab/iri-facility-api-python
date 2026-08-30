@@ -85,4 +85,7 @@ app.include_router(compute.router, prefix=api_prefix)
 app.include_router(filesystem.router, prefix=api_prefix)
 app.include_router(task.router, prefix=api_prefix)
 
+if logo_dir.is_dir() and config.DOCS_LOGO_ROUTE != "/logo":
+    app.mount(config.DOCS_LOGO_ROUTE, StaticFiles(directory=str(logo_dir)), name="api-logo")
+
 logging.getLogger().info(f"API path: {api_prefix}")
