@@ -18,14 +18,19 @@ import uuid
 
 from fastapi import HTTPException
 
+from app.request_context import get_auth_headers
+from app.routers.status import models as status_models
+from app.routers.task import facility_adapter as task_adapter
+from app.routers.task import models as task_models
 from app.s3df.auth.authenticated_adapter import S3DFAuthenticatedAdapter
 from app.s3df.clients import FsFacadeError, get_fs_facade_client
-from app.request_context import get_auth_headers
-from app.routers.task import facility_adapter as task_adapter, models as task_models
-from app.routers.status import models as status_models
 from app.types.user import User
 
 LOG = logging.getLogger(__name__)
+_REQUIRED_FS_AUTH_HEADERS = (
+    "x-auth-request-uid",
+    "x-auth-request-primary-gid",
+)
 
 
 def _model_dict(val) -> dict:
@@ -39,10 +44,41 @@ def _strip_none(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
 
 
+def _required_fs_auth_headers() -> dict[str, str]:
+    auth = get_auth_headers()
+    missing = [name for name in _REQUIRED_FS_AUTH_HEADERS if not auth.get(name)]
+    if missing:
+        raise FsFacadeError(
+            f"Missing required filesystem identity headers: {', '.join(missing)}",
+            status_code=401,
+        )
+
+    try:
+        int(auth["x-auth-request-uid"])
+        primary_gid = int(auth["x-auth-request-primary-gid"])
+        supplemental_gids = [
+            int(gid.strip())
+            for gid in auth.get("x-auth-request-gids", "").split(",")
+            if gid.strip()
+        ]
+    except ValueError as exc:
+        raise FsFacadeError(
+            "Invalid filesystem identity headers",
+            status_code=400,
+        ) from exc
+
+    normalized = dict(auth)
+    normalized["x-auth-request-gids"] = ",".join(
+        str(gid)
+        for gid in dict.fromkeys([primary_gid, *supplemental_gids])
+    )
+    return normalized
+
+
 async def _submit_to_fs_facade(task: task_models.TaskCommand) -> str:
     """Map an IRI TaskCommand to the matching fs-facade HTTP call and return the fs task_id."""
+    auth = _required_fs_auth_headers()
     client = get_fs_facade_client()
-    auth = get_auth_headers() or None
     cmd, args = task.command, task.args
 
     # GET endpoints — params only
