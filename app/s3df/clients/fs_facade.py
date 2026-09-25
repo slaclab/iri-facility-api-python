@@ -85,11 +85,11 @@ class FsFacadeClient:
             return data["task_id"]
         raise FsFacadeError(f"fs-facade returned unexpected payload: {data!r}")
 
-    async def get_task(self, task_id: str) -> dict:
+    async def get_task(self, task_id: str, headers: dict | None = None) -> dict:
         """Fetch the current task record."""
         client = self._get_client()
         try:
-            resp = await client.get(f"/task/{task_id}")
+            resp = await client.get(f"/task/{task_id}", headers=headers)
         except httpx.HTTPError as exc:
             raise FsFacadeError(f"fs-facade transport error: {exc}") from exc
         if resp.status_code == 404:
@@ -102,12 +102,12 @@ class FsFacadeClient:
         # Wrapped in `{"output": Task{...}}` per the task_controller.
         return body.get("output", body) if isinstance(body, dict) else body
 
-    async def wait(self, task_id: str, timeout: float | None = None) -> dict:
+    async def wait(self, task_id: str, timeout: float | None = None, headers: dict | None = None) -> dict:
         """Poll until the task reaches a terminal state. Returns the Task dict."""
         deadline_left = timeout if timeout is not None else self.timeout
         elapsed = 0.0
         while True:
-            task = await self.get_task(task_id)
+            task = await self.get_task(task_id, headers=headers)
             status = task.get("status")
             if status in _TERMINAL:
                 return task
@@ -149,7 +149,7 @@ class FsFacadeClient:
             kwargs["headers"] = headers
 
         task_id = await self._request_task_id(method, path, **kwargs)
-        task = await self.wait(task_id, timeout=timeout)
+        task = await self.wait(task_id, timeout=timeout, headers=headers)
 
         status = task.get("status")
         result = task.get("result")

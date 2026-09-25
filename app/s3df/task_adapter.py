@@ -3,18 +3,23 @@ S3DF Task Adapter
 
 Forwards IRI task operations to fs-facade-service:
   - put_task: submits the filesystem operation to fs-facade without polling,
-    stores an IRI-task-id → fs-facade-task-id mapping, and returns immediately.
+    records the IRI task id → fs-facade task id and owner, and returns immediately.
   - get_task: proxies GET /task/{fs_task_id} on fs-facade and translates the
     result into the IRI Task model.
-  - delete_task: removes from the mapping and deletes from fs-facade.
+  - delete_task: removes the record and deletes from fs-facade.
 
-The class-level _id_map ensures all IriRouter adapter instances (filesystem
+Every read and delete is scoped to the task's owner; other users' task ids
+behave as if they do not exist. Records expire after settings.fs_task_ttl.
+
+The class-level _tasks map ensures all IriRouter adapter instances (filesystem
 router's task_adapter and the task router's own adapter) share the same state.
 """
 
 import json
 import logging
 import uuid
+from dataclasses import dataclass
+from time import monotonic
 
 from fastapi import HTTPException
 
@@ -24,6 +29,7 @@ from app.routers.task import facility_adapter as task_adapter
 from app.routers.task import models as task_models
 from app.s3df.auth.authenticated_adapter import S3DFAuthenticatedAdapter
 from app.s3df.clients import FsFacadeError, get_fs_facade_client
+from app.s3df.config import settings
 from app.types.user import User
 
 LOG = logging.getLogger(__name__)
@@ -73,6 +79,21 @@ def _required_fs_auth_headers() -> dict[str, str]:
         for gid in dict.fromkeys([primary_gid, *supplemental_gids])
     )
     return normalized
+
+
+def _required_fs_auth_headers_or_http_error() -> dict[str, str]:
+    try:
+        return _required_fs_auth_headers()
+    except FsFacadeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@dataclass
+class _TaskRecord:
+    fs_task_id: str
+    owner: str
+    command: task_models.TaskCommand
+    created_at: float
 
 
 async def _submit_to_fs_facade(task: task_models.TaskCommand) -> str:
@@ -154,12 +175,28 @@ async def _submit_to_fs_facade(task: task_models.TaskCommand) -> str:
 class S3DFTaskAdapter(S3DFAuthenticatedAdapter, task_adapter.FacilityAdapter):
     """Task adapter that proxies operations to fs-facade-service."""
 
-    # Class-level maps shared across all IriRouter-created instances.
-    _id_map: dict[str, str] = {}   # iri_task_id → fs_facade_task_id
-    _cmd_map: dict[str, task_models.TaskCommand] = {}  # iri_task_id → original command
+    # Class-level map shared across all IriRouter-created instances.
+    _tasks: dict[str, _TaskRecord] = {}  # iri_task_id → record
 
     def __init__(self):
         pass
+
+    @staticmethod
+    def _owned_record(user: User, task_id: str) -> _TaskRecord | None:
+        record = S3DFTaskAdapter._tasks.get(task_id)
+        if record is None or record.owner != user.id:
+            return None
+        return record
+
+    @staticmethod
+    def _prune_expired() -> None:
+        # Only forgets IRI's record. fs-facade expires its own copy: it only
+        # accepts DELETE /task from the owner, and this may run in another
+        # user's request.
+        cutoff = monotonic() - settings.fs_task_ttl
+        for iri_id, record in list(S3DFTaskAdapter._tasks.items()):
+            if record.created_at < cutoff:
+                del S3DFTaskAdapter._tasks[iri_id]
 
     async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None):
         class _User:
@@ -182,20 +219,26 @@ class S3DFTaskAdapter(S3DFAuthenticatedAdapter, task_adapter.FacilityAdapter):
             LOG.error("fs-facade submit failed for %s:%s: %s", task.router, task.command, exc)
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
+        S3DFTaskAdapter._prune_expired()
         iri_task_id = str(uuid.uuid4())
-        S3DFTaskAdapter._id_map[iri_task_id] = fs_task_id
-        S3DFTaskAdapter._cmd_map[iri_task_id] = task
+        S3DFTaskAdapter._tasks[iri_task_id] = _TaskRecord(
+            fs_task_id=fs_task_id,
+            owner=user.id,
+            command=task,
+            created_at=monotonic(),
+        )
         LOG.info("submitted task %s (fs: %s)  %s:%s", iri_task_id, fs_task_id, task.router, task.command)
         return task_models.TaskSubmitResponse(task_id=iri_task_id)
 
     async def get_task(self, user: User, task_id: str) -> task_models.Task | None:
-        fs_task_id = S3DFTaskAdapter._id_map.get(task_id)
-        if fs_task_id is None:
+        record = self._owned_record(user, task_id)
+        if record is None:
             return None
+        auth = _required_fs_auth_headers_or_http_error()
         try:
-            fs_task = await get_fs_facade_client().get_task(fs_task_id)
+            fs_task = await get_fs_facade_client().get_task(record.fs_task_id, headers=auth)
         except FsFacadeError as exc:
-            LOG.warning("fs-facade get_task failed for %s: %s", fs_task_id, exc)
+            LOG.warning("fs-facade get_task failed for %s: %s", record.fs_task_id, exc)
             return None
 
         raw_result = fs_task.get("result")
@@ -216,23 +259,28 @@ class S3DFTaskAdapter(S3DFAuthenticatedAdapter, task_adapter.FacilityAdapter):
             id=task_id,
             status=task_models.TaskStatus(fs_task["status"]),
             result=raw_result,
-            command=S3DFTaskAdapter._cmd_map.get(task_id),
+            command=record.command,
         )
 
     async def get_tasks(self, user: User) -> list[task_models.Task]:
+        S3DFTaskAdapter._prune_expired()
         tasks = []
-        for iri_id in list(S3DFTaskAdapter._id_map):
+        for iri_id, record in list(S3DFTaskAdapter._tasks.items()):
+            if record.owner != user.id:
+                continue
             t = await self.get_task(user, iri_id)
             if t is not None:
                 tasks.append(t)
         return tasks
 
     async def delete_task(self, user: User, task_id: str) -> None:
-        fs_task_id = S3DFTaskAdapter._id_map.pop(task_id, None)
-        S3DFTaskAdapter._cmd_map.pop(task_id, None)
-        if fs_task_id:
-            try:
-                client = get_fs_facade_client()
-                await client._get_client().delete(f"/task/{fs_task_id}")
-            except Exception as exc:
-                LOG.debug("fs-facade delete_task %s ignored: %s", fs_task_id, exc)
+        record = self._owned_record(user, task_id)
+        if record is None:
+            return
+        auth = _required_fs_auth_headers_or_http_error()
+        S3DFTaskAdapter._tasks.pop(task_id, None)
+        try:
+            client = get_fs_facade_client()
+            await client._get_client().delete(f"/task/{record.fs_task_id}", headers=auth)
+        except Exception as exc:
+            LOG.debug("fs-facade delete_task %s ignored: %s", record.fs_task_id, exc)
