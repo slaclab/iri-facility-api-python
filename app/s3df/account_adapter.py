@@ -145,13 +145,13 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
         allocations = []
         
         # Map compute allocations
-        if len(repo_allocations) == 0:
+        # The client returns None when coact errors or the repo is unknown.
+        if not repo_allocations:
             raise HTTPException(status_code=404, detail=f"No compute allocations found for project {project.id}")
         for comp_alloc in repo_allocations:
-            # comp_alloc_usage = [usage for usage in COACT_REPO_OVERALL_COMPUTE_USAGE if usage["allocation_id"] == comp_alloc["_id"]][0]
             overall_usage = comp_alloc['usage'][0] if comp_alloc.get('usage') else None
             allocations.append(account_models.ProjectAllocation(
-                id=comp_alloc["_id"],
+                id=comp_alloc["Id"],
                 project_id=project.id,
                 capability_id=comp_alloc["clustername"],
                 entries=[account_models.AllocationEntry(
@@ -178,14 +178,19 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
 
         # For this POC, we only have compute allocations with user percentages.
         
-        compute_alloc = await self.coact_client.get_repo_compute_allocation(repo_id=project_allocation.project_id)
-        if not compute_alloc:
-            # return nothing 
+        compute_allocs = await self.coact_client.get_repo_compute_allocations(repo_id=project_allocation.project_id)
+        if not compute_allocs:
+            # return nothing
             return []
 
 
         # Placeholder user percentage based on current understanding of coact data model and existing data in user_allocations collection. This is a simplification for the POC.
-        user_percent = await self.coact_client.get_user_allocation(repo_id=project_allocation.project_id, allocation_id=project_allocation.id) or 100
+        # Users without an explicit share get the whole project allocation.
+        user_allocs = await self.coact_client.get_user_allocation(repo_id=project_allocation.project_id, allocation_id=project_allocation.id)
+        user_percent = next(
+            (ua["percent"] for ua in user_allocs if ua.get("username") == user.id and ua.get("percent") is not None),
+            100,
+        )
         return [account_models.UserAllocation(
             id=f"{project_allocation.id}-{user.id}",
             project_id=project_allocation.project_id,

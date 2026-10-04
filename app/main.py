@@ -115,7 +115,7 @@ APP.include_router(filesystem.router, prefix=api_prefix)
 APP.include_router(storage.router, prefix=api_prefix)
 APP.include_router(task.router, prefix=api_prefix)
 
-if logo_dir.is_dir() and api_prefix.rstrip("/"):
-    APP.mount(f"{api_prefix.rstrip('/')}/logo", StaticFiles(directory=str(logo_dir)), name="api-logo")
+if logo_dir.is_dir() and config.DOCS_LOGO_ROUTE != "/logo":
+    APP.mount(config.DOCS_LOGO_ROUTE, StaticFiles(directory=str(logo_dir)), name="api-logo")
 
 logging.getLogger().info(f"API path: {api_prefix}")

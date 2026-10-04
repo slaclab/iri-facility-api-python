@@ -10,19 +10,34 @@ logger = get_stream_logger(__name__, LOG_LEVEL)
 API_VERSION = "2.0.0"
 API_VERSION_SHORT = "v2"
 
-API_URL_ROOT = os.environ.get("API_URL_ROOT", "https://api.iri.nersc.gov")
+API_URL_ROOT = os.environ.get("API_URL_ROOT", "https://iri.slac.stanford.edu")
 API_PREFIX = os.environ.get("API_PREFIX", "/")
 API_URL = os.environ.get("API_URL", f"api/{API_VERSION_SHORT}")
 
+
+def docs_logo_route(api_prefix: str, api_url: str) -> str:
+    """Return the normalized static logo route."""
+    path_parts = [part.strip("/") for part in (api_prefix, api_url) if part.strip("/")]
+    return "/" + "/".join(path_parts + ["logo"])
+
+
+def docs_logo_url(api_prefix: str, api_url: str) -> str:
+    """Return the logo URL used by the API documentation."""
+    return f"{docs_logo_route(api_prefix, api_url)}/SLAC_primary_red.png"
+
+
+DOCS_LOGO_ROUTE = docs_logo_route(API_PREFIX, API_URL)
+DOCS_LOGO_URL = docs_logo_url(API_PREFIX, API_URL)
+
 # lines in the description can't have indentation (markup format)
-description = """
+description = f"""
 A simple implementation of the IRI facility API using python and the fastApi library.
 
 For more information, see: [https://iri.science/](https://iri.science/)
 
 <img src="https://iri.science/images/doe-icon-old.png" height=50 />
 
-<img src="logo/SLAC_primary_red.png" height=100 />
+<img src="{DOCS_LOGO_URL}" height=100 />
 """
 
 # version is the openapi.json spec version
