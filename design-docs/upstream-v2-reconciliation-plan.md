@@ -88,26 +88,26 @@ restart.
 
 - [x] Baseline tests on prod (`6b38ba0`): S3DF 89 pass / 3 known failures; `test/test_docs_logo.py` 4 pass.
 - [x] Baseline on July branch (`894059f`): S3DF 56 pass / 4 failures (3 known + a URN `is` comparison).
-- [x] Merge prod fixes into the July branch (`8b129f3`).
-- [x] Merge `upstream/main@5413e80` (`77e1764`); remove the project-header dependency.
+- [x] Merge prod fixes into the July branch (`4125fc0`).
+- [x] Merge `upstream/main@5413e80` (`2019e78`); remove the project-header dependency.
 - [x] All seven S3DF adapters instantiate; OpenAPI builds with 47 `/api/v2` paths.
 - [x] S3DF 102 pass / the same 4 failures; `test/test_docs_logo.py` 4 pass.
 
 ### Phase 2: v2 build-out (integration branch)
 
 - [x] Image tag for the v2 line (`v2-MMDDYYYY`), never `prod-*`; `dev-s3df` no longer sets
-      `IRI_SHOW_MISSING_ROUTES=true`, which now fails startup (`61dc13d`).
+      `IRI_SHOW_MISSING_ROUTES=true`, which now fails startup (`4083622`).
 - [x] Restore upstream's copies of `app/routers/compute/compute.py` and
-      `app/routers/status/status.py` (whitespace-only divergence) (`62720a6`).
+      `app/routers/status/status.py` (whitespace-only divergence) (`a6e026a`).
 - [x] Account: upstream's required `Project.last_modified`, mapped from the CoAct repo
-      ObjectId (decision D7) (`9aa117f`).
+      ObjectId (decision D7) (`2d6d3df`).
 - [x] Status: `compute:system` / `storage:filesystem` subtypes, `capability: list[str]`,
-      HAL affordance tests, URN comparison test fixed (`74db59d`).
+      HAL affordance tests, URN comparison test fixed (`c160d17`).
 - [x] Storage: accept `storage:*` subtypes for `sdfhome`; the old exact-type check would have
-      returned 501 for every `/storage` request after re-typing (`74db59d`).
+      returned 501 for every `/storage` request after re-typing (`c160d17`).
 - [x] Idempotency: `app.s3df.idempotency.InMemoryIdempotencyStore`, configured in the image,
-      `dev-s3df`, and the env template (`55cea7b`).
-- [x] Auth: Globus remnants removed (`3ea50c5`). The `Authenticated user` print is kept
+      `dev-s3df`, and the env template (`58bfb1a`).
+- [x] Auth: Globus remnants removed (`80b1113`). The `Authenticated user` print is kept
       because the troubleshooting runbooks key on it.
 - [x] Docs: this plan; July docs marked superseded. `README.md` stays identical to upstream.
 
@@ -126,10 +126,19 @@ Not yet done:
 
 ### Phase 3: validation before review
 
-- [ ] `uv run python -m pytest app/s3df/tests test -q` with only the 3 known failures.
-- [ ] OpenAPI from the S3DF configuration validated against the upstream v2 spec
-      (the `api-validation.yml` schemathesis job, pointed at S3DF adapters or a dev deployment).
-- [ ] Container build; image starts with production-like env and `IRI_SHOW_MISSING_ROUTES=false`.
+- [x] `uv run python -m pytest app/s3df/tests test -q`: 124 pass; only the 3 known failures
+      (2 for the commented-out CoAct membership check, 1 filesystem download).
+- [x] Operations compared with the official
+      `iri-facility-api-docs/specification-v2/openapi/all_spec_v2.yaml`: all 47 official
+      operations present with matching `operationId`s, plus upstream's `/account/whoami`, which
+      the published spec does not list yet. Remaining schema differences (`_links` marked
+      required) come from upstream's routers, which S3DF uses unchanged.
+- [x] End-to-end idempotency through the app (lifespan store → v2 router → S3DF compute adapter
+      with stubbed Slurm): miss, hit with the same job id and no second submit, 422 on a changed
+      body; `job_spec.attributes.account` reaches the Slurm request.
+- [x] Image builds; with deployment-supplied `DEX_AUDIENCE` it starts with all seven adapters and
+      the S3DF store, serves `/api/v2` (and 404 for `/api/v1`), and shuts down cleanly.
+- [ ] Schemathesis (`api-validation.yml`) against a v2 dev deployment; it needs live backends.
 - [ ] Dev deployment smoke tests (section 8).
 
 ### Phase 4: publish and roll out (needs maintainer approval)
@@ -137,6 +146,10 @@ Not yet done:
 - [ ] Tag prod, fast-forward `main`, cut `release/v1` (section 3).
 - [ ] Push the integration branch as a fast-forward of `merge/upstream-v2-s3df`; open the PR.
 - [ ] Deploy v2 beside v1 (decision D3); keep the v1 deployment and image until v2 passes.
+      The v2 deployment needs the same config and secrets as v1 (`DEX_AUDIENCE`, `SLURM_JWT`,
+      `SLURM_REST_URL`, CoAct credentials, `FS_FACADE_URL`, `S3DF_STATUS_API_URL`); `API_URL`
+      now defaults to `api/v2`, so do not copy an `API_URL=api/v1` override from the v1 overlay.
+      fs-facade must accept calls from the new deployment (NetworkPolicy).
 
 ## 6. Decisions
 
