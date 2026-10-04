@@ -15,6 +15,8 @@ ENV IRI_API_ADAPTER_facility="app.s3df.facility_adapter.S3DFFacilityAdapter"
 ENV IRI_API_ADAPTER_storage="app.s3df.storage_adapter.S3DFStorageAdapter"
 ENV IRI_API_ADAPTER_task="app.s3df.task_adapter.S3DFTaskAdapter"
 ENV IRI_SHOW_MISSING_ROUTES="false"
+# Single replica, single process: see app/s3df/idempotency.py before scaling out.
+ENV IRI_IDEMPOTENCY_STORE="app.s3df.idempotency.InMemoryIdempotencyStore"
 ENV DEX_JWKS_URL="https://dex.slac.stanford.edu/keys"
 ENV DEX_ISSUER="https://dex.slac.stanford.edu"
 ENV API_URL_ROOT="https://sdf-iri-dev.slac.stanford.edu"
