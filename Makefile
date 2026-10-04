@@ -56,13 +56,15 @@ dev-s3df: deps
 	IRI_API_ADAPTER_status=app.s3df.status_adapter.S3DFStatusAdapter \
 	IRI_API_ADAPTER_storage=app.s3df.storage_adapter.S3DFStorageAdapter \
 	COACT_API_URL='https://coact-dev.slac.stanford.edu/graphql-service-dev' \
-	IRI_SHOW_MISSING_ROUTES='true' \
+	IRI_SHOW_MISSING_ROUTES='false' \
 	API_URL_ROOT='http://127.0.0.1:8000' fastapi dev
 
 # --- Docker / GHCR targets ---
+# The v2 line builds v2-MMDDYYYY tags. prod-MMDDYYYY tags belong to release/v1:
+# prod pulls reused tags with imagePullPolicy: Always.
 GHCR_USERNAME ?= slaclab
 GHCR_IMAGE ?= ghcr.io/$(GHCR_USERNAME)/iri-s3df
-IMAGE_TAG  ?= prod-09242026
+IMAGE_TAG  ?= v2-10042026
 
 docker-build:
 	docker build --platform linux/amd64 -t $(GHCR_IMAGE):$(IMAGE_TAG) .
