@@ -47,7 +47,6 @@ from pydantic import ConfigDict, ValidationError
 from ..routers.compute import models as compute_models
 from ..types.user import User
 from ..routers.status import models as status_models
-from ..request_context import get_iri_facility_project
 import shlex
 
 logger = logging.getLogger(__name__)
@@ -437,7 +436,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             reservation = job_spec.attributes.reservation_id
 
         partition = partition or os.environ.get("SLURM_DEFAULT_PARTITION")
-        account = account or get_iri_facility_project() or os.environ.get("SLURM_DEFAULT_ACCOUNT")
+        account = account or os.environ.get("SLURM_DEFAULT_ACCOUNT")
 
         if job_spec.resources:
             node_count = job_spec.resources.node_count or 1
@@ -567,7 +566,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
                 partition = getattr(attributes, "queue_name", None)
                 if partition:
                     update_fields["partition"] = partition
-                account = getattr(attributes, "account", None) or get_iri_facility_project()
+                account = getattr(attributes, "account", None)
                 if account:
                     update_fields["account"] = account
 

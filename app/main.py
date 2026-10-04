@@ -25,7 +25,6 @@ from .idempotency import create_store
 from .request_context import (
     _api_url_base,
     _auth_headers,
-    _iri_facility_project,
     set_api_url_base,
     set_auth_headers,
 )
@@ -45,7 +44,7 @@ configure_logging(config.LOG_LEVEL)
 # OpenTelemetry Configuration
 # ------------------------------------------------------------------
 if config.OPENTELEMETRY_ENABLED:
-    resource = Resource.create({"service.name": "iri-facility-api", "service.version": config.API_VERSION, "service.endpoint": config.API_URL_ROOT})
+    resource = Resource.create({"service.name": config.OTEL_SERVICE_NAME, "service.version": config.API_VERSION, "service.endpoint": config.API_URL_ROOT})
 
     if config.OTEL_TRACES_ENABLED:
         samplerate = "1.0" if config.OPENTELEMETRY_DEBUG else config.OTEL_SAMPLE_RATE
@@ -67,6 +66,7 @@ if config.OPENTELEMETRY_ENABLED:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    configure_logging(config.LOG_LEVEL)
     app.state.idempotency_store = create_store()
     yield
     await app.state.idempotency_store.close()
@@ -85,7 +85,6 @@ if logo_dir.is_dir():
 class _ExternalRequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         url_token = _api_url_base.set(None)
-        facility_project_token = _iri_facility_project.set(None)
         auth_headers_token = _auth_headers.set(None)
         try:
             set_api_url_base(request)
@@ -93,7 +92,6 @@ class _ExternalRequestContextMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         finally:
             _api_url_base.reset(url_token)
-            _iri_facility_project.reset(facility_project_token)
             _auth_headers.reset(auth_headers_token)
 
 

@@ -38,10 +38,10 @@ async def get_resources(
         min_length=DOE_IRI_URN_MIN_LENGTH,
         pattern=DOE_IRI_URN_SCHEMA_PATTERN,
         description="DOE IRI resource type URN (urn:doe-iri:<domain>:<nss>). Facility-local extensions accepted.",
-        examples=[models.ResourceType.compute, models.ResourceType.storage, models.ResourceType.service],
+        examples=[models.ResourceType.compute, models.ResourceType.storage, models.ResourceType.storage_system, models.ResourceType.service],
     ),
     current_status: models.Status = Query(default=None),
-    capability: List[AllocationUnitValue] = Query(default=None, min_length=1),
+    capability: list[str] | None = Query(default_factory=list, description="Capability ids to filter by. Including multiple capability ids returns any matches (logical OR not AND)."),
     _forbid=Depends(forbidExtraQueryParams("name", "description", "group", "offset", "limit", "modified_since", "resource_type", "current_status", "capability", multiParams={"capability"})),
 ) -> list[models.Resource]:
     return await router.adapter.get_resources(
@@ -117,7 +117,7 @@ async def get_incidents(
         )
     ),
 ) -> list[models.Incident]:
-    incidents = await router.adapter.get_incidents(
+    return await router.adapter.get_incidents(
         offset=offset,
         limit=limit,
         name=name,
@@ -131,9 +131,7 @@ async def get_incidents(
         resource_id=resource_id,
         resolution=resolution,
     )
-    if not incidents:
-        raise HTTPException(status_code=404, detail="No incidents found")
-    return incidents
+
 
 @router.get(
     "/incidents/{incident_id}",
@@ -173,12 +171,9 @@ async def get_events(
     limit: int = Query(default=100, ge=0, le=1000),
     _forbid=Depends(forbidExtraQueryParams("incident_id", "resource_id", "name", "description", "status", "from", "to", "time", "modified_since", "offset", "limit")),
 ) -> list[models.Event]:
-    events = await router.adapter.get_events(
+    return await router.adapter.get_events(
         incident_id=incident_id, offset=offset, limit=limit, resource_id=resource_id, name=name, description=description, status=status, from_=from_, to=to, time_=time_, modified_since=modified_since
     )
-    if not events:
-        raise HTTPException(status_code=404, detail="No events found")
-    return events
 
 
 @router.get(

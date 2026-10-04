@@ -3,6 +3,7 @@
 from fastapi import Depends, Header, Query, Request, status
 
 from ...idempotency import build_body_hash, build_cache_key, run_with_idempotency
+from ...types.hal import OPERATION_RELATIONS
 from ...types.http import forbidExtraQueryParams
 from ...types.scalars import StrictHTTPBool
 from ...types.user import User
@@ -41,14 +42,13 @@ async def get_resources(
     response_model_exclude_unset=True,
     responses=DEFAULT_RESPONSES,
     operation_id="launchJob",
-    openapi_extra=iri_meta_dict("production", "required")
+    openapi_extra=iri_meta_dict("production", "required", relations=[OPERATION_RELATIONS["submit-job"]])
 )
 async def submit_job(
     resource_id: str,
     job_spec: models.JobSpec,
     request: Request,
     user: User = Depends(router.current_user),
-    project_name: str | None = Depends(router.iri_header_project),
     _forbid=Depends(forbidExtraQueryParams()),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
@@ -57,12 +57,6 @@ async def submit_job(
 
     - **resource**: the name of the compute resource to use
     - **job_request**: a PSIJ job spec as defined <a href="https://exaworks.org/psij-python/docs/v/0.9.11/.generated/tree.html#jobspec">here</a>
-    - **project/account resolution**:
-      The effective project/account for the submission must be supplied in exactly one place:
-      `job_spec.attributes.account` or the trusted `X-IRI-Facility-Project` request header.
-      If the forwarded header is present and valid, IRI treats its value as the effective facility-native project/account
-      for the downstream submission and related job metadata. If both sources are present, or neither is present,
-      the request is rejected with `400 Bad Request`.
     - **Idempotency-Key**: optional client-generated UUID. A retry with the same key and body
       returns the original response without re-submitting the job. Same key with a different body
       returns 422. An in-flight duplicate returns 409.
@@ -87,7 +81,7 @@ async def submit_job(
     response_model_exclude_unset=True,
     responses=DEFAULT_RESPONSES,
     operation_id="updateJob",
-    openapi_extra=iri_meta_dict("production", "required")
+    openapi_extra=iri_meta_dict("production", "required", relations=[OPERATION_RELATIONS["update-job"]])
 )
 async def update_job(
     resource_id: str,
@@ -95,7 +89,6 @@ async def update_job(
     job_spec: models.JobSpec,
     request: Request,
     user: User = Depends(router.current_user),
-    project_name: str | None = Depends(router.iri_header_project),
     _forbid=Depends(forbidExtraQueryParams()),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
@@ -105,12 +98,6 @@ async def update_job(
 
     - **resource**: the name of the compute resource to use
     - **job_request**: a PSIJ job spec as defined <a href="https://exaworks.org/psij-python/docs/v/0.9.11/.generated/tree.html#jobspec">here</a>
-    - **project/account resolution**:
-      The effective project/account for the update must be supplied in exactly one place:
-      `job_spec.attributes.account` or the trusted `X-IRI-Facility-Project` request header.
-      If the forwarded header is present and valid, IRI treats its value as the effective facility-native project/account
-      for downstream update handling and job metadata. If both sources are present, or neither is present,
-      the request is rejected with `400 Bad Request`.
     - **Idempotency-Key**: optional client-generated UUID. Same semantics as submit_job.
     """
     resource = await status_router.adapter.get_resource(resource_id)
@@ -131,7 +118,7 @@ async def update_job(
     response_model_exclude_unset=True,
     responses=DEFAULT_RESPONSES,
     operation_id="getJob",
-    openapi_extra=iri_meta_dict("production", "required")
+    openapi_extra=iri_meta_dict("production", "required", relations=[OPERATION_RELATIONS["get-job"]])
 )
 async def get_job_status(
     resource_id: str,
@@ -158,7 +145,7 @@ async def get_job_status(
     response_model_exclude_unset=True,
     responses=DEFAULT_RESPONSES,
     operation_id="getJobs",
-    openapi_extra=iri_meta_dict("production", "required")
+    openapi_extra=iri_meta_dict("production", "required", relations=[OPERATION_RELATIONS["query-jobs"]])
 )
 async def get_job_statuses(
     resource_id: str,
@@ -188,7 +175,7 @@ async def get_job_statuses(
     response_model_exclude_unset=True,
     responses=DEFAULT_RESPONSES,
     operation_id="cancelJob",
-    openapi_extra=iri_meta_dict("production", "required")
+    openapi_extra=iri_meta_dict("production", "required", relations=[OPERATION_RELATIONS["cancel-job"]])
 )
 async def cancel_job(
     resource_id: str,

@@ -160,8 +160,13 @@ class ResourceType(str, Enum):
     website = "urn:doe-iri:service:website"
     service = "urn:doe-iri:service:generic"
     compute = "urn:doe-iri:resource:compute"
+    compute_system = "urn:doe-iri:resource:compute:system"
     system = "urn:doe-iri:resource:system"
     storage = "urn:doe-iri:resource:storage"
+    storage_system = "urn:doe-iri:resource:storage:system"
+    storage_filesystem = "urn:doe-iri:resource:storage:filesystem"
+    storage_mount = "urn:doe-iri:resource:storage:mount"
+    service_dtn = "urn:doe-iri:resource:service:dtn"
     network = "urn:doe-iri:resource:network"
     unknown = "urn:doe-iri:resource:unknown"
 
@@ -217,6 +222,24 @@ CompressionTypeValue = Annotated[
             "compression",
             "DOE IRI compression URN.",
             [CompressionType.gzip, CompressionType.none],
+        )
+    ),
+]
+
+ComputeUrnValue = Annotated[
+    str,
+    BeforeValidator(lambda v: _validate_urn_domain(v, "compute", "compute URN")),
+    WithJsonSchema(
+        _domain_urn_schema(
+            "compute",
+            "DOE IRI compute-domain URN, e.g. a container capability discovery "
+            "value (container-runtime, container-image-format, "
+            "container-acquisition, etc.) or an existing system-capability, "
+            "cpu-architecture, or gpu-programming-interface value.",
+            [
+                "urn:doe-iri:compute:container-runtime:apptainer",
+                "urn:doe-iri:compute:container-acquisition:pre-stage-required",
+            ],
         )
     ),
 ]
