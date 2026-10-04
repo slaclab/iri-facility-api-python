@@ -171,7 +171,7 @@ class S3DFStatusAdapter(status_adapter.FacilityAdapter):
         modified_since: datetime.datetime | None = None,
         resource_type: status_models.ResourceTypeValue | None = None,
         current_status: status_models.Status | None = None,
-        capability=None,
+        capability: list[str] | None = None,
         site_id: str | None = None,
     ) -> list[status_models.Resource]:
         resources = await self._all_resources()

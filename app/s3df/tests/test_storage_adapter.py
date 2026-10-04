@@ -7,6 +7,8 @@ from fastapi import HTTPException
 
 from app.routers.status import models as status_models
 from app.routers.storage import models as storage_models
+from app.s3df.status_adapter import _build_resource
+from app.s3df.status_registry import S3DF_RESOURCES
 from app.s3df.storage_adapter import S3DFStorageAdapter
 from app.types.user import User
 
@@ -34,6 +36,18 @@ def _user(username: str = "amithm") -> User:
         api_key="test-token",
         client_ip="127.0.0.1",
     )
+
+
+@pytest.mark.asyncio
+async def test_sdfhome_from_status_registry_is_supported():
+    # The status adapter types sdfhome as a storage:filesystem subtype.
+    resource = _build_resource(S3DF_RESOURCES["sdfhome"], None)
+
+    locations = await S3DFStorageAdapter().get_locations(
+        resource, _user(), None, None, None, None
+    )
+
+    assert [location.path for location in locations] == ["/sdf/home/a/amithm"]
 
 
 @pytest.mark.asyncio

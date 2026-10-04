@@ -48,8 +48,43 @@ async def test_get_resources_merges_registry_and_status(monkeypatch):
     ada = by_id["ada"]
     assert ada.name == "Batch (ada)"
     assert ada.group == "compute"
-    assert ada.resource_type is status_models.ResourceType.compute
+    assert ada.resource_type == status_models.ResourceType.compute_system
     assert ada.current_status is status_models.Status.up
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resource_type", "expected_group"),
+    [
+        (status_models.ResourceType.compute, "compute"),
+        (status_models.ResourceType.compute_system, "compute"),
+        (status_models.ResourceType.storage, "storage"),
+        (status_models.ResourceType.storage_filesystem, "storage"),
+    ],
+)
+async def test_resource_type_filter_matches_parent_and_subtype(monkeypatch, resource_type, expected_group):
+    adapter, _ = _make_adapter(monkeypatch)
+    resources = await adapter.get_resources(offset=0, limit=100, resource_type=resource_type)
+    expected = {meta.id for meta in S3DF_RESOURCES.values() if meta.group == expected_group}
+    assert {r.id for r in resources} == expected
+
+
+@pytest.mark.asyncio
+async def test_resources_advertise_v2_operation_links(monkeypatch):
+    adapter, _ = _make_adapter(monkeypatch)
+    by_id = {r.id: r.model_dump(mode="json") for r in await adapter.get_resources(offset=0, limit=100)}
+
+    milano = by_id["milano"]["_links"]
+    assert milano["iri:submit-job"]["href"].endswith("/compute/job/milano")
+    assert milano["iri:get-job"]["href"].endswith("/compute/status/milano/{job_id}")
+    assert milano["iri:located-at"]["href"].endswith("/facility/sites/s3df")
+    assert not any(rel.startswith("iri:list-directory") for rel in milano)
+
+    sdfhome = by_id["sdfhome"]["_links"]
+    assert sdfhome["iri:list-directory"]["href"].endswith("/filesystem/ls/sdfhome")
+    assert "iri:submit-job" not in sdfhome
+
+    assert sorted(by_id["sdfk8s"]["_links"]) == ["curies", "iri:located-at", "self"]
 
 
 @pytest.mark.asyncio

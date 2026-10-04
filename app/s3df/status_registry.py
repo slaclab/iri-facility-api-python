@@ -29,6 +29,9 @@ class ResourceMeta:
 
 
 # 11 resources, ids/names/groups from s3df-status-api/resources.yaml.
+# Slurm partitions are compute:system so v2 advertises the job-lifecycle HAL
+# links on them; the Weka clusters are storage:filesystem. Filters on the parent
+# types (urn:doe-iri:resource:compute / :storage) still match both.
 S3DF_RESOURCES: dict[str, ResourceMeta] = {
     meta.id: meta
     for meta in (
@@ -37,7 +40,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Batch (ada)",
             description="S3DF Slurm batch partition for Ada GPU nodes.",
             group="compute",
-            resource_type=status_models.ResourceType.compute,
+            resource_type=status_models.ResourceType.compute_system,
             supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
@@ -45,7 +48,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Batch (ampere)",
             description="S3DF Slurm batch partition for Ampere GPU nodes.",
             group="compute",
-            resource_type=status_models.ResourceType.compute,
+            resource_type=status_models.ResourceType.compute_system,
             supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
@@ -53,7 +56,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Batch (turing)",
             description="S3DF Slurm batch partition for Turing GPU nodes.",
             group="compute",
-            resource_type=status_models.ResourceType.compute,
+            resource_type=status_models.ResourceType.compute_system,
             supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
@@ -61,7 +64,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Batch (milano)",
             description="S3DF Slurm batch partition for Milano CPU nodes.",
             group="compute",
-            resource_type=status_models.ResourceType.compute,
+            resource_type=status_models.ResourceType.compute_system,
             supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
@@ -69,7 +72,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Batch (torino)",
             description="S3DF Slurm batch partition for Torino CPU nodes.",
             group="compute",
-            resource_type=status_models.ResourceType.compute,
+            resource_type=status_models.ResourceType.compute_system,
             supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
@@ -77,7 +80,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Batch (roma)",
             description="S3DF Slurm batch partition for Roma CPU nodes.",
             group="compute",
-            resource_type=status_models.ResourceType.compute,
+            resource_type=status_models.ResourceType.compute_system,
             supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
@@ -85,7 +88,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Batch (hopper)",
             description="S3DF Slurm batch partition for Hopper GPU nodes.",
             group="compute",
-            resource_type=status_models.ResourceType.compute,
+            resource_type=status_models.ResourceType.compute_system,
             supported_endpoints=(status_models.Endpoint.compute,),
         ),
         ResourceMeta(
@@ -93,7 +96,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Storage (sdfhome)",
             description="S3DF Weka cluster for home directories (/sdf/home).",
             group="storage",
-            resource_type=status_models.ResourceType.storage,
+            resource_type=status_models.ResourceType.storage_filesystem,
             supported_endpoints=(status_models.Endpoint.filesystem,),
         ),
         ResourceMeta(
@@ -101,7 +104,7 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Storage (sdfdata)",
             description="S3DF Weka cluster for project/group data (sdfdata).",
             group="storage",
-            resource_type=status_models.ResourceType.storage,
+            resource_type=status_models.ResourceType.storage_filesystem,
             supported_endpoints=(status_models.Endpoint.filesystem,),
         ),
         ResourceMeta(
@@ -109,14 +112,14 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             name="Storage (sdfk8s)",
             description="S3DF Weka cluster for Kubernetes persistent volumes (sdfk8s).",
             group="storage",
-            resource_type=status_models.ResourceType.storage,
+            resource_type=status_models.ResourceType.storage_filesystem,
         ),
         ResourceMeta(
             id="sdfscratch",
             name="Storage (sdfscratch)",
             description="S3DF Weka cluster for scratch storage (/sdf/scratch).",
             group="storage",
-            resource_type=status_models.ResourceType.storage,
+            resource_type=status_models.ResourceType.storage_filesystem,
             supported_endpoints=(status_models.Endpoint.filesystem,),
         ),
     )

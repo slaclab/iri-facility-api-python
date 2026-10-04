@@ -23,10 +23,21 @@ def test_registry_has_all_expected_resources():
     assert list(S3DF_RESOURCES.keys()) == EXPECTED_IDS
 
 
-def test_registry_resource_types_match_yaml():
+def test_registry_resource_types_use_v2_subtypes():
     by_id = S3DF_RESOURCES
-    assert by_id["ada"].resource_type is status_models.ResourceType.compute
-    assert by_id["sdfhome"].resource_type is status_models.ResourceType.storage
+    partitions = [meta for meta in by_id.values() if meta.group == "compute"]
+    filesystems = [meta for meta in by_id.values() if meta.group == "storage"]
+    assert {meta.resource_type for meta in partitions} == {status_models.ResourceType.compute_system}
+    assert {meta.resource_type for meta in filesystems} == {status_models.ResourceType.storage_filesystem}
+
+
+def test_registry_endpoints():
+    by_id = S3DF_RESOURCES
+    for meta in by_id.values():
+        if meta.group == "compute":
+            assert meta.supported_endpoints == (status_models.Endpoint.compute,)
+    assert by_id["sdfhome"].supported_endpoints == (status_models.Endpoint.filesystem,)
+    assert by_id["sdfk8s"].supported_endpoints == ()
 
 
 def test_registry_groups_match_yaml():

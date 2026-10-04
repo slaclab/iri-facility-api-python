@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from app.routers.status import models as status_models
 from app.routers.storage import facility_adapter, models as storage_models
 from app.s3df.auth.authenticated_adapter import S3DFAuthenticatedAdapter
+from app.types.scalars import urn_has_complete_prefix
 from app.types.user import User
 
 
@@ -27,7 +28,7 @@ def _require_sdfhome(resource: status_models.Resource) -> None:
     """Reject resources for which S3DF cannot provide static storage discovery."""
     if (
         resource.id != _SDFHOME_RESOURCE_ID
-        or resource.resource_type != status_models.ResourceType.storage
+        or not urn_has_complete_prefix(status_models.ResourceType.storage.value, resource.resource_type)
     ):
         raise HTTPException(
             status_code=501,
