@@ -1,4 +1,6 @@
-"""Tests for the S3DF account adapter's allocation mapping (coact-backed)."""
+"""Tests for the S3DF account adapter's project and allocation mapping (coact-backed)."""
+
+import datetime
 
 import pytest
 from fastapi import HTTPException
@@ -19,7 +21,58 @@ def _project() -> account_models.Project:
         name="lcls:mfx101592326",
         description="",
         user_ids=["alice", "bob"],
+        last_modified="2026-01-01T00:00:00Z",
     )
+
+
+# A CoAct-style repo Id: an ObjectId created at 2023-06-14T18:15:37Z.
+REPO_OBJECT_ID = "648a03c9b1e8f2a4c0d1e2f3"
+
+
+def _repo(repo_id: str = REPO_OBJECT_ID) -> dict:
+    # Shaped like coact's myRepos.
+    return {
+        "Id": repo_id,
+        "name": "mfx101592326",
+        "facility": "lcls",
+        "principal": "carol",
+        "leaders": ["bob"],
+        "users": ["alice", "bob"],
+        "description": "MFX beamtime",
+    }
+
+
+class FakeRepos:
+    def __init__(self, repos):
+        self.repos = repos
+
+    async def get_user_repos(self, username):
+        return self.repos
+
+
+@pytest.mark.asyncio
+async def test_projects_map_repo_and_stable_last_modified():
+    adapter = S3DFAccountAdapter(coact_client=FakeRepos([_repo()]))
+
+    first = await adapter.get_projects(user=_user())
+    second = await adapter.get_projects(user=_user())
+
+    [project] = first
+    assert project.id == REPO_OBJECT_ID
+    assert project.name == "lcls:mfx101592326"
+    assert sorted(project.user_ids) == ["alice", "bob", "carol"]
+    assert project.last_modified == datetime.datetime(2023, 6, 14, 18, 15, 37, tzinfo=datetime.timezone.utc)
+    assert second[0].last_modified == project.last_modified
+    assert project.model_dump(mode="json")["last_modified"] == "2023-06-14T18:15:37Z"
+
+
+@pytest.mark.asyncio
+async def test_projects_without_object_id_use_fixed_timestamp():
+    adapter = S3DFAccountAdapter(coact_client=FakeRepos([_repo("not-an-object-id")]))
+
+    [project] = await adapter.get_projects(user=_user())
+
+    assert project.last_modified == datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
 def _compute_alloc(alloc_id: str, cluster: str, allocated: float = 1000, used: float = 250) -> dict:

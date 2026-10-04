@@ -16,6 +16,9 @@ Data Model Mapping (coact → IRI):
 
 
 
+import datetime
+import re
+
 from fastapi import HTTPException
 
 from app.types.user import User
@@ -26,6 +29,22 @@ from ..routers.account import facility_adapter as account_adapter
 from app.s3df.auth.authenticated_adapter import S3DFAuthenticatedAdapter
 from app.s3df.clients import get_coact_client
 from app.s3df.clients.coact import CoactClient
+
+
+_OBJECT_ID = re.compile(r"^[0-9a-fA-F]{24}$")
+_UNKNOWN_PROJECT_TIME = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _repo_last_modified(repo_id: str) -> datetime.datetime:
+    """Stable timestamp for Project.last_modified, which v2 requires.
+
+    CoAct exposes no modification time for repos, but a repo Id is a MongoDB
+    ObjectId whose first four bytes are its creation time. Using that rather
+    than the current time keeps responses stable between requests.
+    """
+    if isinstance(repo_id, str) and _OBJECT_ID.match(repo_id):
+        return datetime.datetime.fromtimestamp(int(repo_id[:8], 16), tz=datetime.timezone.utc)
+    return _UNKNOWN_PROJECT_TIME
 
 
 class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapter):
@@ -108,6 +127,7 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
         - name → name
         - description → description
         - users + leaders + principal → user_ids
+        - creation time embedded in Id → last_modified
         """
         projects = []
         repos = await self.coact_client.get_user_repos(user.id)
@@ -119,7 +139,8 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
                 id=repo["Id"],
                 name=f"{repo['facility']}:{repo['name']}",
                 description=repo.get("description", ""),
-                user_ids=list(all_users)
+                user_ids=list(all_users),
+                last_modified=_repo_last_modified(repo["Id"]),
             ))
         
         return projects
