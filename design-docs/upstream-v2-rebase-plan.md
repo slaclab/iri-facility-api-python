@@ -1,5 +1,9 @@
 # Upstream v2 Integration Plan and S3DF Adapter Impact
 
+> **Superseded (2026-10-04)** by [upstream-v2-reconciliation-plan.md](upstream-v2-reconciliation-plan.md).
+> Its baselines (`7c06e2b`, `5eab585`) are stale, and upstream has since removed the
+> `X-IRI-Facility-Project` header this document relies on (fd4c009).
+
 ## Scope and verified baseline
 
 This plan integrates `doe-iri/iri-facility-api-python` `main` into the SLAC fork while preserving the S3DF implementation and its facility-specific behavior. The implementation used a union-first merge because the fork and upstream both have substantial published history.

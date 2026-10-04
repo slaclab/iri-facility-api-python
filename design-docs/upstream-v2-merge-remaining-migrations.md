@@ -1,5 +1,9 @@
 # Upstream v2 S3DF Remaining Migrations
 
+> **Superseded (2026-10-04)** by [upstream-v2-reconciliation-plan.md](upstream-v2-reconciliation-plan.md).
+> Its baselines (`7c06e2b`, `5eab585`) are stale, and upstream has since removed the
+> `X-IRI-Facility-Project` header this document relies on (fd4c009).
+
 ## Status
 
 The first-draft integration is on `merge/upstream-v2-s3df`.
