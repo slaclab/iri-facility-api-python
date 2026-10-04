@@ -209,7 +209,7 @@ class S3DFTaskAdapter(S3DFAuthenticatedAdapter, task_adapter.FacilityAdapter):
             if record.created_at < cutoff:
                 del S3DFTaskAdapter._tasks[iri_id]
 
-    async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None):
+    async def get_user(self, user_id: str, api_key: str, client_ip: str | None):
         class _User:
             def __init__(self, uid: str, key: str):
                 self.id = uid

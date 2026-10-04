@@ -60,7 +60,7 @@ class S3DFAccountAdapter(S3DFAuthenticatedAdapter, account_adapter.FacilityAdapt
     # AuthenticatedAdapter methods
     # -------------------------------------------------------------------------
 
-    async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None) -> User:
+    async def get_user(self, user_id: str, api_key: str, client_ip: str | None) -> User:
         """
         coact.User → IRI.User mapping:
         - username → id

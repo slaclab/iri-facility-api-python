@@ -44,7 +44,6 @@ class S3DFStorageAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityAdap
         user_id: str,
         api_key: str,
         client_ip: str | None,
-        globus_introspect: dict | None = None,
     ) -> User:
         return User(
             id=user_id,

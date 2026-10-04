@@ -73,7 +73,7 @@ def _content_payload(text: str, *, content_type: models.ContentUnit, offset: int
 class S3DFFilesystemAdapter(S3DFAuthenticatedAdapter, facility_adapter.FacilityAdapter):
     """Filesystem adapter that forwards operations to fs-facade-service."""
 
-    async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None):
+    async def get_user(self, user_id: str, api_key: str, client_ip: str | None):
         class _User:
             def __init__(self, uid: str, key: str):
                 self.id = uid

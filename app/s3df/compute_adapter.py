@@ -350,7 +350,7 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
 
     # -- AuthenticatedAdapter methods ---------------------------------------
 
-    async def get_user(self, user_id: str, api_key: str, client_ip: str | None, globus_introspect: dict | None = None):
+    async def get_user(self, user_id: str, api_key: str, client_ip: str | None):
         """
         Return a minimal user object.  The unix_username is the critical field —
         it becomes the `sun` claim in the Slurm JWT.
