@@ -20,6 +20,7 @@ import base64
 from typing import Optional
 from ..routers.compute import facility_adapter as compute_adapter
 from ..routers.compute.models import JobState
+from app.request_context import get_auth_headers
 from app.s3df.auth.authenticated_adapter import S3DFAuthenticatedAdapter
 import jwt  # PyJWT
 from slurmrestd_client.api_client import ApiClient
@@ -195,29 +196,58 @@ def _job_from_slurm_info(job_info, include_spec: bool = False) -> dict:
         },
     }
     if include_spec:
-        tl = getattr(job_info, "time_limit", None)
-        if tl is None:
-            duration_secs = 0
-        elif isinstance(tl, (int, float)):
-            duration_secs = int(tl) * 60
-        elif getattr(tl, "set", False):
-            duration_secs = int(getattr(tl, "number", 0) or 0) * 60
-        else:
-            duration_secs = 0
-
-        job_dict["spec"] = {
-            "name": getattr(job_info, "name", None),
-            "executable": getattr(job_info, "batch_script", None),
+        # Slurm reports unset strings as "", which the JobSpec min_length=1 fields reject.
+        job_dict["job_spec"] = {
+            "name": getattr(job_info, "name", None) or None,
+            "executable": getattr(job_info, "command", None) or None,
+            "directory": getattr(job_info, "current_working_directory", None) or None,
+            "stdout_path": getattr(job_info, "standard_output", None) or None,
             "resources": {
-                "node_count": getattr(job_info, "num_nodes", None),
+                "node_count": _no_val_number(getattr(job_info, "node_count", None)) or None,
             },
             "attributes": {
-                "queue_name": getattr(job_info, "partition", None),
-                "account": getattr(job_info, "account", None),
-                "duration": duration_secs,
+                "queue_name": getattr(job_info, "partition", None) or None,
+                "account": getattr(job_info, "account", None) or None,
+                "duration": _duration_secs(_no_val_number(getattr(job_info, "time_limit", None))),
             },
         }
     return job_dict
+
+
+def _no_val_number(value) -> int | None:
+    """Read a slurmrestd set/infinite/number struct; None when unset or infinite."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if getattr(value, "set", False) and not getattr(value, "infinite", False):
+        return int(getattr(value, "number", 0) or 0)
+    return None
+
+
+def _duration_secs(limit_mins: int | None) -> int | None:
+    # JobAttributes.duration must be >= 1, so unset/unlimited limits become None.
+    return limit_mins * 60 if limit_mins else None
+
+
+def _caller_uid() -> int | None:
+    """Numeric uid injected by s3df-authnz for the current request."""
+    try:
+        return int(get_auth_headers().get("x-auth-request-uid", ""))
+    except ValueError:
+        return None
+
+
+def _owns_live_job(job_info, unix_user: str, uid: int | None) -> bool:
+    """slurmctld shows every user's jobs, so ownership is checked here.
+
+    slurmrestd leaves user_name empty when it cannot resolve names, so the
+    authnz uid is compared first. Without either identity the job is hidden.
+    """
+    job_uid = getattr(job_info, "user_id", None)
+    if uid is not None and job_uid is not None:
+        return job_uid == uid
+    return bool(job_info.user_name) and job_info.user_name == unix_user
 
 def _job_from_slurmdb_info(job_record, include_spec: bool = False) -> dict:
     """
@@ -249,15 +279,8 @@ def _job_from_slurmdb_info(job_record, include_spec: bool = False) -> dict:
     if include_spec:
         time_obj = getattr(job_record, "time", None)
         tl = getattr(time_obj, "limit", None) if time_obj is not None else None
-        if tl is not None and getattr(tl, "set", False):
-            duration_secs = int(getattr(tl, "number", 0) or 0) * 60
-        else:
-            duration_secs = 0
+        duration_secs = _duration_secs(_no_val_number(tl))
 
-        # NB: the model field is `job_spec` (compute_models.Job). The live-job
-        # helper `_job_from_slurm_info` uses the key "spec", which does not match
-        # and is silently dropped by IRIBaseModel's serializer — a pre-existing
-        # bug in that helper's include_spec path.
         job_dict["job_spec"] = {
             "name": getattr(job_record, "name", None),
             "resources": {
@@ -563,11 +586,14 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
     ) -> dict:
         """GET /compute/status/{resource_id}/{job_id}"""
         api, headers = self._get_slurm_context(user)
+        unix_user = getattr(user, "unix_username", user.id)
 
         try:
             # Try active jobs first
             resp = api.slurm_v0041_get_job(job_id, _headers=headers)
             if resp and resp.jobs:
+                if not _owns_live_job(resp.jobs[0], unix_user, _caller_uid()):
+                    raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
                 return _job_from_slurm_info(resp.jobs[0], include_spec)
         except ApiException as exc:
             if exc.status != 404:
@@ -631,8 +657,16 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             logger.exception("Slurm get_jobs failed")
             raise HTTPException(status_code=500, detail="Slurm get_jobs failed") from exc
 
-        
-        jobs = resp.jobs or []
+        # slurmctld returns every job on the cluster; keep only the caller's jobs
+        # on this resource. A job can list several partitions ("milano,roma").
+        unix_user = getattr(user, "unix_username", user.id)
+        uid = _caller_uid()
+        resource_id = getattr(resource, "id", resource)
+        jobs = [
+            j for j in (resp.jobs or [])
+            if _owns_live_job(j, unix_user, uid)
+            and (resource_id is None or resource_id in (j.partition or "").split(","))
+        ]
 
         # Apply caller-supplied filters (key = Slurm job_info attribute name)
         if filters:

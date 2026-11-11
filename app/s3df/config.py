@@ -44,6 +44,8 @@ class S3DFSettings:
         self.fs_facade_url = os.getenv("FS_FACADE_URL", "http://fs-facade-service:8100")
         self.fs_facade_poll_interval = float(os.getenv("FS_FACADE_POLL_INTERVAL", "0.25"))
         self.fs_facade_timeout = float(os.getenv("FS_FACADE_TIMEOUT", "60"))
+        # How long IRI remembers a submitted filesystem task (seconds).
+        self.fs_task_ttl = float(os.getenv("FS_TASK_TTL", "86400"))
 
         # s3df-status-api (status microservice)
         self.s3df_status_api_url = os.getenv("S3DF_STATUS_API_URL", "http://s3df-status-api:8080")
