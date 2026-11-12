@@ -27,7 +27,8 @@ class ResourceMeta:
     capability_ids: list[str] = field(default_factory=list)
 
 
-# 11 resources, ids/names/groups from s3df-status-api/resources.yaml.
+# 12 resources, ids/names/groups from s3df-status-api/resources.yaml
+# (blackwell must also be added there, or its status stays "unknown").
 S3DF_RESOURCES: dict[str, ResourceMeta] = {
     meta.id: meta
     for meta in (
@@ -77,6 +78,13 @@ S3DF_RESOURCES: dict[str, ResourceMeta] = {
             id="hopper",
             name="Batch (hopper)",
             description="S3DF Slurm batch partition for Hopper GPU nodes.",
+            group="compute",
+            resource_type=status_models.ResourceType.compute,
+        ),
+        ResourceMeta(
+            id="blackwell",
+            name="Batch (blackwell)",
+            description="S3DF Slurm batch partition for Blackwell GPU nodes.",
             group="compute",
             resource_type=status_models.ResourceType.compute,
         ),

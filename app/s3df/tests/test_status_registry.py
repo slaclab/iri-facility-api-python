@@ -12,6 +12,7 @@ EXPECTED_IDS = [
     "torino",
     "roma",
     "hopper",
+    "blackwell",
     "sdfhome",
     "sdfdata",
     "sdfk8s",
