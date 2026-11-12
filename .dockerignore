@@ -1,3 +1,9 @@
 .venv/
 .env
 *.log
+.claude/
+.git/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+**/__pycache__/

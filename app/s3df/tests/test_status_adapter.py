@@ -57,7 +57,7 @@ async def test_get_resources_filter_by_group(monkeypatch):
     adapter, _ = _make_adapter(monkeypatch)
     resources = await adapter.get_resources(offset=0, limit=100, group="compute")
     ids = {r.id for r in resources}
-    assert ids == {"ada", "ampere", "turing", "milano", "torino", "roma", "hopper"}
+    assert ids == {"ada", "ampere", "turing", "milano", "torino", "roma", "hopper", "blackwell"}
 
 
 @pytest.mark.asyncio

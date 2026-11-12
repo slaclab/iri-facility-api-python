@@ -98,7 +98,27 @@ PARTITION_GPU_TYPE: dict[str, str] = {
     "turing": "geforce_rtx_2080_ti",
     "ada":    "l40s",
     "hopper": "h200",
+    # blackwell: GRES type not mapped yet, so GPU requests go out untyped
+    # (gres/gpu:N). Add it once confirmed with `sinfo -p blackwell -o %G`.
 }
+
+
+def _resource_partition(resource) -> str:
+    """Slurm partition named by the ``{resource_id}`` in a /compute path.
+
+    The router resolves ``resource_id`` through the status adapter: an unknown
+    id comes back as ``None``, and with no status adapter it stays a plain
+    string. Unknown and non-compute resources are a 404 rather than silently
+    falling back to ``SLURM_DEFAULT_PARTITION`` or matching every partition.
+    """
+    if isinstance(resource, str):
+        return resource
+    if resource is None:
+        raise HTTPException(status_code=404, detail="Compute resource not found")
+    resource_type = getattr(resource, "resource_type", status_models.ResourceType.compute)
+    if resource_type != status_models.ResourceType.compute:
+        raise HTTPException(status_code=404, detail=f"{resource.id} is not a compute resource")
+    return resource.id
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +453,9 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             account = job_spec.attributes.account
             reservation = job_spec.attributes.reservation_id
 
-        partition = partition or os.environ.get("SLURM_DEFAULT_PARTITION")
+        # The path's resource is the partition; queue_name may still override
+        # it (e.g. "milano,roma" for multi-partition submission).
+        partition = partition or _resource_partition(resource)
         account = account or os.environ.get("SLURM_DEFAULT_ACCOUNT")
 
         if job_spec.resources:
@@ -651,6 +673,8 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
             # is supported for now; revisit listing once load is characterised.
             raise HTTPException(status_code=501, detail="Historical job listing is not implemented yet")
 
+        partition = _resource_partition(resource)
+
         try:
             resp = api.slurm_v0041_get_jobs(_headers=headers)
         except ApiException as exc:
@@ -661,11 +685,10 @@ class SLACComputeAdapter(S3DFAuthenticatedAdapter, compute_adapter.FacilityAdapt
         # on this resource. A job can list several partitions ("milano,roma").
         unix_user = getattr(user, "unix_username", user.id)
         uid = _caller_uid()
-        resource_id = getattr(resource, "id", resource)
         jobs = [
             j for j in (resp.jobs or [])
             if _owns_live_job(j, unix_user, uid)
-            and (resource_id is None or resource_id in (j.partition or "").split(","))
+            and partition in (j.partition or "").split(",")
         ]
 
         # Apply caller-supplied filters (key = Slurm job_info attribute name)
